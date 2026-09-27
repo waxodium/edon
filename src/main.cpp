@@ -2,6 +2,8 @@
 #include <vector>
 #include <string>
 #include "cli.hpp"
+#include "logger.hpp"
+#include "runtime.hpp"
 
 extern "C" {
     void edon_init_runtime() {}
@@ -12,28 +14,43 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::string> args(argv + 1, argv + argc);
     if (args.empty()) {
-        std::cout << "no inputs were passed\n";
+        printHelp();
         return 0;
     }
 
     SplitArgs split = splitCommandArgs(args);
     ParseResult global_parsed = parseOptions(split.global_args, GLOBAL_OPTIONS);
 
+    // Flag: --version
     if (global_parsed.flags["version"] == "true") {
         std::cout << "v" << edon::HEADEDON.version << "\n";
         return 0;
     }
 
+    // Flag: --help
     if (global_parsed.flags["help"] == "true" && split.command_name.empty()) {
         printHelp();
         return 0;
     }
 
+    // Command: help
     if (split.command_name == "help") {
         if (!split.command_args.empty()) {
             printHelp(split.command_args[0]);
         } else {
             printHelp();
+        }
+        return 0;
+    }
+
+    // Command/File Execution: Pass script file to JavaScriptCore
+    if (!split.command_name.empty()) {
+        std::string target_file = split.command_name;
+
+        EdonRuntime runtime;
+        if (!runtime.executeFile(target_file)) {
+            logger::error("Execution failed for: " + target_file);
+            return 1;
         }
         return 0;
     }

@@ -1,0 +1,105 @@
+#pragma once
+
+#include <ffi.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace edon {
+namespace ffi {
+
+enum class TypeKind {
+    Void,
+    Bool,
+    Int8,
+    UInt8,
+    Int16,
+    UInt16,
+    Int32,
+    UInt32,
+    Int64,
+    UInt64,
+    Size,
+    SSize,
+    Float,
+    Double,
+    Pointer,
+    CString,
+    Struct,
+    Array
+};
+
+struct Type;
+
+struct Field {
+    std::string name;
+    std::shared_ptr<Type> type;
+    std::size_t offset = 0;
+};
+
+struct Type {
+    TypeKind kind = TypeKind::Void;
+    std::string name;
+    std::vector<Field> fields;
+    std::shared_ptr<Type> element;
+    std::size_t count = 0;
+    ffi_type* ffi = nullptr;
+    std::size_t size = 0;
+    std::size_t alignment = 0;
+    bool complete = false;
+
+    ~Type();
+
+    Type() = default;
+    Type(const Type&) = delete;
+    Type& operator=(const Type&) = delete;
+    Type(Type&&) = delete;
+    Type& operator=(Type&&) = delete;
+};
+
+struct Signature {
+    std::shared_ptr<Type> returns;
+    std::vector<std::shared_ptr<Type>> args;
+    ffi_cif cif{};
+    std::vector<ffi_type*> ffiArgs;
+    bool prepared = false;
+};
+
+std::shared_ptr<Type> makeType(TypeKind kind);
+
+std::shared_ptr<Type> makeStruct(
+    const std::string& name,
+    std::vector<Field> fields
+);
+
+std::shared_ptr<Type> makeArray(
+    std::shared_ptr<Type> element,
+    std::size_t count
+);
+
+std::shared_ptr<Type> parseTypeName(
+    const std::string& name
+);
+
+bool prepareType(
+    const std::shared_ptr<Type>& type
+);
+
+bool prepareSignature(
+    Signature& signature
+);
+
+const char* typeName(TypeKind kind);
+
+bool isInteger(TypeKind kind);
+bool isSignedInteger(TypeKind kind);
+bool isUnsignedInteger(TypeKind kind);
+bool isFloating(TypeKind kind);
+bool isPointer(TypeKind kind);
+bool isAggregate(TypeKind kind);
+
+} // namespace ffi
+} // namespace edon

@@ -3,18 +3,25 @@
 #include <string>
 #include <string_view>
 #include <iomanip>
+#include <vector>
 #include "edon.hpp"
 #include "parser.hpp"
 
 namespace color {
-    inline constexpr std::string_view RESET     = "\033[0m";
-    inline constexpr std::string_view UNDERLINE = "\033[4m";
-    inline constexpr std::string_view RED       = "\033[38;2;251;73;52m";
-    inline constexpr std::string_view GREEN     = "\033[38;2;184;187;38m";
-    inline constexpr std::string_view CYAN      = "\033[38;2;142;192;124m";
-    inline constexpr std::string_view PINK_BOLD = "\033[1;38;2;211;134;155m";
+    inline constexpr std::string_view RESET          = "\033[0m";
+    inline constexpr std::string_view UNDERLINE      = "\033[4m";
+    inline constexpr std::string_view BOLD           = "\033[1m";
 
-    inline constexpr std::string_view ORANGE    = "\033[38;2;254;128;25m";
+    inline constexpr std::string_view RED            = "\033[38;2;251;73;52m";   // #fb4934 (Bright Red)
+    inline constexpr std::string_view GREEN          = "\033[38;2;184;187;38m";  // #b8bb26 (Bright Green)
+    inline constexpr std::string_view YELLOW         = "\033[38;2;250;189;47m";  // #fabd2f (Bright Yellow)
+    inline constexpr std::string_view BLUE           = "\033[38;2;131;165;152m"; // #83a598 (Bright Blue)
+    inline constexpr std::string_view ORANGE         = "\033[38;2;254;128;25m";  // #fe8019 (Bright Orange)
+    inline constexpr std::string_view AQUA           = "\033[38;2;142;192;124m"; // #8ec07c (Bright Aqua / Darker Cyan)
+    inline constexpr std::string_view GRAY           = "\033[38;2;146;131;116m"; // #928374 (Gray / Muted text)
+    
+    inline constexpr std::string_view AQUA_BOLD      = "\033[1;38;2;142;192;124m";
+    inline constexpr std::string_view YELLOW_BOLD    = "\033[1;38;2;250;189;47m";
 }
 
 struct CommandConfig {
@@ -62,19 +69,20 @@ inline void printHelp(std::string_view target_cmd = "") {
             exit(1);
         }
 
-        std::cout << color::UNDERLINE << "COMMAND:" << color::RESET << "\n  "
-                  << color::PINK_BOLD << found->name << color::RESET << " - " << found->description << "\n\n";
-        std::cout << color::UNDERLINE << "USAGE:" << color::RESET << "\n  "
+        std::cout << color::UNDERLINE << color::BLUE << "COMMAND:" << color::RESET << "\n  "
+                  << color::YELLOW_BOLD << found->name << color::RESET << " - " << found->description << "\n\n";
+                  
+        std::cout << color::UNDERLINE << color::BLUE << "USAGE:" << color::RESET << "\n  "
                   << color::RED << "edon" << color::RESET << " " << found->name << " [options]\n\n";
         return;
     }
 
     std::cout << edon::HEADEDON.description << "\n\n";
-    std::cout << color::UNDERLINE << "Usage" << color::RESET << ":\n  "
+    std::cout << color::UNDERLINE << color::BLUE << "Usage" << color::RESET << ":\n  "
               << color::ORANGE << edon::HEADEDON.name << color::RESET << " [globals] <command> [options] [...args]\n\n";
 
     if (!GLOBAL_OPTIONS.empty()) {
-        std::cout << color::UNDERLINE << "GLOBAL OPTIONS" << color::RESET << ":\n";
+        std::cout << color::UNDERLINE << color::BLUE << "GLOBAL OPTIONS" << color::RESET << ":\n";
         for (const auto& opt : GLOBAL_OPTIONS) {
             std::cout << "  " << color::GREEN << std::left << std::setw(24) << formatFlag(opt)
                       << color::RESET << opt.description << "\n";
@@ -83,14 +91,15 @@ inline void printHelp(std::string_view target_cmd = "") {
     }
 
     if (!REGISTERED_COMMANDS.empty()) {
-        std::cout << color::UNDERLINE << "Commands" << color::RESET << ":\n";
+        std::cout << color::UNDERLINE << color::BLUE << "Commands" << color::RESET << ":\n";
         for (const auto& cmd : REGISTERED_COMMANDS) {
-            std::cout << "  " << color::PINK_BOLD << std::left << std::setw(24) << cmd.name
+            std::cout << "  " << color::AQUA_BOLD << std::left << std::setw(24) << cmd.name
                       << color::RESET << cmd.description << "\n";
         }
         std::cout << "\n";
     }
 
-    std::cout << edon::HEADEDON.name << " " << edon::HEADEDON.version << " (" << edon::HEADEDON.commit << ")\n";
-    std::cout << "Home Page: <" << color::UNDERLINE << color::CYAN << edon::HEADEDON.homepage << color::RESET << ">\n";
+    std::cout << color::GRAY << edon::HEADEDON.name << " " << edon::HEADEDON.version << " (" << edon::HEADEDON.commit << ")\n" << color::RESET;
+    std::cout << "Home Page: <" << color::UNDERLINE << color::AQUA << edon::HEADEDON.homepage << color::RESET << ">\n";
 }
+
