@@ -1,4 +1,6 @@
 #include "ffi_call.hpp"
+#include "ffi_callback.hpp"
+#include "ffi_errors.hpp"
 #include "ffi_memory.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
@@ -8,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,89 +19,6 @@ namespace edon {
 namespace ffi {
 
 namespace {
-
-void throwError(JSContextRef context, JSValueRef *error,
-                const std::string &message) {
-  if (!error)
-    return;
-
-  JSStringRef string = JSStringCreateWithUTF8CString(message.c_str());
-
-  if (!string) {
-    *error = nullptr;
-    return;
-  }
-
-  JSValueRef messageValue = JSValueMakeString(context, string);
-
-  *error = JSObjectMakeError(context, 1, &messageValue, nullptr);
-
-  JSStringRelease(string);
-}
-
-const char *jsTypeName(JSContextRef context, JSValueRef value) {
-  if (JSValueIsUndefined(context, value))
-    return "undefined";
-
-  if (JSValueIsNull(context, value))
-    return "null";
-
-  if (JSValueIsBoolean(context, value))
-    return "boolean";
-
-  if (JSValueIsBigInt(context, value))
-    return "bigint";
-
-  if (JSValueIsNumber(context, value))
-    return "number";
-
-  if (JSValueIsString(context, value))
-    return "string";
-
-  if (JSValueIsObject(context, value))
-    return "object";
-
-  return "unknown";
-}
-
-std::string jsValueDescription(JSContextRef context, JSValueRef value) {
-  if (JSValueIsUndefined(context, value))
-    return "undefined";
-
-  if (JSValueIsNull(context, value))
-    return "null";
-
-  if (JSValueIsBoolean(context, value))
-    return JSValueToBoolean(context, value) ? "true" : "false";
-
-  JSStringRef string = JSValueToStringCopy(context, value, nullptr);
-
-  if (!string)
-    return jsTypeName(context, value);
-
-  const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
-
-  if (size == 0) {
-    JSStringRelease(string);
-    return jsTypeName(context, value);
-  }
-
-  std::vector<char> buffer(size);
-
-  const std::size_t length =
-      JSStringGetUTF8CString(string, buffer.data(), buffer.size());
-
-  JSStringRelease(string);
-
-  if (length == 0)
-    return jsTypeName(context, value);
-
-  return std::string(buffer.data(), length - 1);
-}
-
-std::string argumentPrefix(std::size_t index, const char *type) {
-  return "FFI: argument " + std::to_string(index) + " (" + type + ")";
-}
 
 bool getNumber(JSContextRef context, JSValueRef value, double &number,
                JSValueRef *error) {
@@ -119,13 +39,11 @@ template <typename T>
 bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output,
                             JSValueRef *error, const char *type,
                             std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
+  (void)type;
+  (void)index;
 
   if (!JSValueIsNumber(context, value)) {
-    throwError(context, error,
-               prefix + " requires a Number, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedNumber);
     return false;
   }
 
@@ -135,9 +53,7 @@ bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output,
     return false;
 
   if (!isSafeInteger(number)) {
-    throwError(context, error,
-               prefix + " requires a safe integer Number; got " +
-                   jsValueDescription(context, value));
+    throwError(context, error, ErrorCode::UnsafeInteger);
     return false;
   }
 
@@ -150,42 +66,61 @@ bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output,
       static_cast<long double>(std::numeric_limits<T>::max());
 
   if (numericValue < minimum || numericValue > maximum) {
-    throwError(context, error,
-               prefix + " value " + jsValueDescription(context, value) +
-                   " is outside the " + type + " range");
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
   output = static_cast<T>(number);
+
   return true;
 }
 
 bool valueToString(JSContextRef context, JSValueRef value, std::string &output,
                    JSValueRef *error) {
-  JSStringRef string = JSValueToStringCopy(context, value, error);
+  JSValueRef localError = nullptr;
+  JSValueRef *targetError = error ? error : &localError;
 
-  if (error && *error)
+  JSStringRef string = JSValueToStringCopy(context, value, targetError);
+
+  if (*targetError)
     return false;
 
-  if (!string)
+  if (!string) {
+    throwError(context, error, ErrorCode::InvalidValue);
     return false;
+  }
 
   const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
 
   if (size == 0) {
     JSStringRelease(string);
+
+    throwError(context, error, ErrorCode::InvalidValue);
+
     return false;
   }
 
-  std::vector<char> buffer(size);
+  std::vector<char> buffer;
+
+  try {
+    buffer.resize(size);
+  } catch (const std::bad_alloc &) {
+    JSStringRelease(string);
+
+    throwError(context, error, ErrorCode::NativeCallFailed);
+
+    return false;
+  }
 
   const std::size_t length =
       JSStringGetUTF8CString(string, buffer.data(), buffer.size());
 
   JSStringRelease(string);
 
-  if (length == 0)
+  if (length == 0) {
+    throwError(context, error, ErrorCode::InvalidValue);
     return false;
+  }
 
   output.assign(buffer.data(), length - 1);
 
@@ -270,10 +205,11 @@ bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum,
 bool convertBigIntToInt64(JSContextRef context, JSValueRef value,
                           int64_t &output, JSValueRef *error, const char *type,
                           std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
+  (void)type;
+  (void)index;
 
   if (!JSValueIsBigInt(context, value)) {
-    throwError(context, error, prefix + " requires a BigInt");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
@@ -284,10 +220,7 @@ bool convertBigIntToInt64(JSContextRef context, JSValueRef value,
 
   if (!parseSigned(text, std::numeric_limits<int64_t>::min(),
                    std::numeric_limits<int64_t>::max(), output)) {
-    throwError(context, error,
-               prefix + " BigInt " + text + " is outside the int64 range [" +
-                   std::to_string(std::numeric_limits<int64_t>::min()) + ", " +
-                   std::to_string(std::numeric_limits<int64_t>::max()) + "]");
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
@@ -297,10 +230,11 @@ bool convertBigIntToInt64(JSContextRef context, JSValueRef value,
 bool convertBigIntToUInt64(JSContextRef context, JSValueRef value,
                            uint64_t &output, JSValueRef *error,
                            const char *type, std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
+  (void)type;
+  (void)index;
 
   if (!JSValueIsBigInt(context, value)) {
-    throwError(context, error, prefix + " requires a BigInt");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
@@ -310,10 +244,7 @@ bool convertBigIntToUInt64(JSContextRef context, JSValueRef value,
     return false;
 
   if (!parseUnsigned(text, std::numeric_limits<uint64_t>::max(), output)) {
-    throwError(context, error,
-               prefix + " BigInt " + text +
-                   " is outside the uint64 range [0, " +
-                   std::to_string(std::numeric_limits<uint64_t>::max()) + "]");
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
@@ -342,13 +273,11 @@ template <typename T>
 bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output,
                              JSValueRef *error, const char *type,
                              std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
+  (void)type;
+  (void)index;
 
   if (!JSValueIsNumber(context, value)) {
-    throwError(context, error,
-               prefix + " requires a Number, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedNumber);
     return false;
   }
 
@@ -358,18 +287,14 @@ bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output,
     return false;
 
   if (!std::isfinite(number)) {
-    throwError(context, error,
-               prefix + " requires a finite Number; got " +
-                   jsValueDescription(context, value));
+    throwError(context, error, ErrorCode::InvalidFloat);
     return false;
   }
 
   output = static_cast<T>(number);
 
   if (!std::isfinite(static_cast<double>(output))) {
-    throwError(context, error,
-               prefix + " value " + jsValueDescription(context, value) +
-                   " is outside the representable range of " + type);
+    throwError(context, error, ErrorCode::FloatOverflow);
     return false;
   }
 
@@ -379,7 +304,7 @@ bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output,
 bool convertPointerArgument(JSContextRef context, JSValueRef value,
                             void *destination, JSValueRef *error,
                             std::size_t index) {
-  const std::string prefix = argumentPrefix(index, "pointer");
+  (void)index;
 
   if (JSValueIsNull(context, value)) {
     *static_cast<void **>(destination) = nullptr;
@@ -387,6 +312,19 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value,
   }
 
   if (JSValueIsObject(context, value)) {
+    CallbackState *callback = getCallbackState(context, value);
+
+    if (callback) {
+      if (!callback->alive || callback->destroyed || !callback->executable) {
+        throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
+        return false;
+      }
+
+      *static_cast<void **>(destination) = callback->executable;
+
+      return true;
+    }
+
     PointerState *pointer = getNativePointer(context, value);
 
     if (pointer) {
@@ -396,7 +334,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value,
         return false;
 
       if (address == 0) {
-        throwError(context, error, prefix + " contains a null NativePointer");
+        throwError(context, error, ErrorCode::NullPointer);
         return false;
       }
 
@@ -412,8 +350,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value,
       (void)size;
 
       if (!data) {
-        throwError(context, error,
-                   prefix + " references an empty native ArrayBuffer");
+        throwError(context, error, ErrorCode::InvalidPointer);
         return false;
       }
 
@@ -422,8 +359,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value,
     }
   }
 
-  throwError(context, error,
-             prefix + " requires a NativePointer, native ArrayBuffer, or null");
+  throwError(context, error, ErrorCode::ExpectedPointer);
 
   return false;
 }
@@ -432,7 +368,7 @@ bool convertCStringArgument(JSContextRef context, JSValueRef value,
                             void *destination,
                             std::vector<std::vector<char>> &stringStorage,
                             JSValueRef *error, std::size_t index) {
-  const std::string prefix = argumentPrefix(index, "cstring");
+  (void)index;
 
   if (JSValueIsNull(context, value)) {
     *static_cast<const char **>(destination) = nullptr;
@@ -440,20 +376,20 @@ bool convertCStringArgument(JSContextRef context, JSValueRef value,
   }
 
   if (!JSValueIsString(context, value)) {
-    throwError(context, error,
-               prefix + " requires a String or null, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedString);
     return false;
   }
 
-  JSStringRef string = JSValueToStringCopy(context, value, error);
+  JSValueRef localError = nullptr;
+  JSValueRef *targetError = error ? error : &localError;
 
-  if (error && *error)
+  JSStringRef string = JSValueToStringCopy(context, value, targetError);
+
+  if (*targetError)
     return false;
 
   if (!string) {
-    throwError(context, error, prefix + " could not convert string");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
@@ -462,11 +398,20 @@ bool convertCStringArgument(JSContextRef context, JSValueRef value,
   if (size == 0) {
     JSStringRelease(string);
 
-    throwError(context, error, prefix + " string conversion failed");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
-  std::vector<char> storage(size);
+  std::vector<char> storage;
+
+  try {
+    storage.resize(size);
+  } catch (const std::bad_alloc &) {
+    JSStringRelease(string);
+
+    throwError(context, error, ErrorCode::NativeCallFailed);
+    return false;
+  }
 
   const std::size_t length =
       JSStringGetUTF8CString(string, storage.data(), storage.size());
@@ -474,7 +419,7 @@ bool convertCStringArgument(JSContextRef context, JSValueRef value,
   JSStringRelease(string);
 
   if (length == 0) {
-    throwError(context, error, prefix + " string conversion failed");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
@@ -490,26 +435,19 @@ bool convertArgument(JSContextRef context, JSValueRef value,
                      JSValueRef *error, std::size_t index,
                      std::vector<std::vector<char>> &stringStorage) {
   if (!type) {
-    throwError(context, error,
-               "FFI: argument " + std::to_string(index) +
-                   " has no native type");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
   if (!destination) {
-    throwError(context, error,
-               "FFI: argument " + std::to_string(index) +
-                   " has no native storage");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
   switch (type->kind) {
   case TypeKind::Bool:
     if (!JSValueIsBoolean(context, value)) {
-      throwError(context, error,
-                 argumentPrefix(index, "bool") + " requires a Boolean, got " +
-                     jsTypeName(context, value) + " (" +
-                     jsValueDescription(context, value) + ")");
+      throwError(context, error, ErrorCode::InvalidArgument);
       return false;
     }
 
@@ -608,21 +546,16 @@ bool convertArgument(JSContextRef context, JSValueRef value,
                                   error, index);
 
   case TypeKind::Void:
-    throwError(context, error,
-               argumentPrefix(index, "void") + " is not a valid argument type");
+    throwError(context, error, ErrorCode::UnsupportedArgumentType);
     return false;
 
   case TypeKind::Struct:
   case TypeKind::Array:
-    throwError(context, error,
-               argumentPrefix(index, typeName(type->kind)) +
-                   " is not supported by the native call layer");
+    throwError(context, error, ErrorCode::UnsupportedArgumentType);
     return false;
   }
 
-  throwError(context, error,
-             "FFI: argument " + std::to_string(index) +
-                 " has an unknown native type");
+  throwError(context, error, ErrorCode::InvalidArgument);
 
   return false;
 }
@@ -631,7 +564,7 @@ JSValueRef convertReturn(JSContextRef context,
                          const std::shared_ptr<Type> &type, const void *value,
                          JSValueRef *error) {
   if (!type) {
-    throwError(context, error, "FFI: native function has no return type");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return JSValueMakeUndefined(context);
   }
 
@@ -639,8 +572,7 @@ JSValueRef convertReturn(JSContextRef context,
     return JSValueMakeUndefined(context);
 
   if (!value) {
-    throwError(context, error,
-               "FFI: native function returned without valid storage");
+    throwError(context, error, ErrorCode::InvalidValue);
     return JSValueMakeUndefined(context);
   }
 
@@ -715,16 +647,14 @@ JSValueRef convertReturn(JSContextRef context,
   case TypeKind::CString:
   case TypeKind::Struct:
   case TypeKind::Array:
-    throwError(context, error,
-               "FFI: native return type " + std::string(typeName(type->kind)) +
-                   " is not supported by the native call layer");
+    throwError(context, error, ErrorCode::UnsupportedReturnType);
     return JSValueMakeUndefined(context);
 
   case TypeKind::Void:
     return JSValueMakeUndefined(context);
   }
 
-  throwError(context, error, "FFI: native function has an unknown native type");
+  throwError(context, error, ErrorCode::InvalidValue);
 
   return JSValueMakeUndefined(context);
 }
@@ -735,8 +665,9 @@ std::size_t storageWords(std::size_t size) {
   if (size == 0)
     return 1;
 
-  if (size > std::numeric_limits<std::size_t>::max() - (wordSize - 1))
+  if (size > std::numeric_limits<std::size_t>::max() - (wordSize - 1)) {
     return 0;
+  }
 
   return (size + wordSize - 1) / wordSize;
 }
@@ -744,43 +675,39 @@ std::size_t storageWords(std::size_t size) {
 bool validateSignature(JSContextRef context, const Signature &signature,
                        JSValueRef *error) {
   if (!signature.prepared) {
-    throwError(context, error, "FFI: libffi signature has not been prepared");
+    throwError(context, error, ErrorCode::SignaturePreparationFailed);
     return false;
   }
 
   if (!signature.returns || !signature.returns->ffi ||
       !signature.returns->complete) {
-    throwError(context, error,
-               "FFI: libffi signature has no valid return type");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return false;
   }
 
   if (signature.args.size() != signature.ffiArgs.size()) {
-    throwError(context, error,
-               "FFI: prepared signature argument count is invalid");
+    throwError(context, error, ErrorCode::InvalidArgumentList);
     return false;
   }
 
   if (signature.args.size() > std::numeric_limits<unsigned int>::max()) {
-    throwError(context, error, "FFI: signature contains too many arguments");
+    throwError(context, error, ErrorCode::InvalidArgumentList);
     return false;
   }
 
   if (signature.cif.nargs != static_cast<unsigned int>(signature.args.size())) {
-    throwError(context, error,
-               "FFI: prepared libffi argument count is invalid");
+    throwError(context, error, ErrorCode::InvalidArgumentList);
     return false;
   }
 
   if (signature.cif.rtype != signature.returns->ffi) {
-    throwError(context, error, "FFI: prepared libffi return type is invalid");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return false;
   }
 
   if (signature.args.empty()) {
     if (signature.cif.arg_types != nullptr) {
-      throwError(context, error,
-                 "FFI: prepared libffi argument storage is invalid");
+      throwError(context, error, ErrorCode::InvalidSignature);
       return false;
     }
 
@@ -788,8 +715,7 @@ bool validateSignature(JSContextRef context, const Signature &signature,
   }
 
   if (signature.cif.arg_types != signature.ffiArgs.data()) {
-    throwError(context, error,
-               "FFI: prepared libffi argument storage is invalid");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return false;
   }
 
@@ -798,8 +724,7 @@ bool validateSignature(JSContextRef context, const Signature &signature,
 
     if (!type || !type->ffi || !type->complete ||
         signature.ffiArgs[i] != type->ffi) {
-      throwError(context, error,
-                 "FFI: prepared libffi argument type is invalid");
+      throwError(context, error, ErrorCode::InvalidSignature);
       return false;
     }
   }
@@ -818,16 +743,13 @@ bool jsValueToNative(JSContextRef context, JSValueRef value,
     return convertArgument(context, value, type, destination, error, 0,
                            stringStorage);
   } catch (const std::bad_alloc &) {
-    throwError(context, error,
-               "FFI: native argument conversion ran out of memory");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return false;
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native argument conversion failed: ") +
-                   exception.what());
+  } catch (const std::exception &) {
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return false;
   } catch (...) {
-    throwError(context, error, "FFI: native argument conversion failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return false;
   }
 }
@@ -838,16 +760,13 @@ JSValueRef nativeToJSValue(JSContextRef context,
   try {
     return convertReturn(context, type, value, error);
   } catch (const std::bad_alloc &) {
-    throwError(context, error,
-               "FFI: native return conversion ran out of memory");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native return conversion failed: ") +
-                   exception.what());
+  } catch (const std::exception &) {
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   } catch (...) {
-    throwError(context, error, "FFI: native return conversion failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   }
 }
@@ -858,9 +777,7 @@ JSValueRef callNativeFunction(JSContextRef context,
                               const JSValueRef arguments[], JSValueRef *error) {
   try {
     if (!function.address) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': symbol address is null");
+      throwError(context, error, ErrorCode::InvalidNativeFunction);
       return JSValueMakeUndefined(context);
     }
 
@@ -868,17 +785,13 @@ JSValueRef callNativeFunction(JSContextRef context,
       return JSValueMakeUndefined(context);
 
     if (argumentCount != signature.args.size()) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': expected " + std::to_string(signature.args.size()) +
-                     " argument(s), received " + std::to_string(argumentCount));
+      throwError(context, error, ErrorCode::ArgumentCountMismatch,
+                 signature.args.size(), argumentCount);
       return JSValueMakeUndefined(context);
     }
 
     if (argumentCount != 0 && !arguments) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': argument storage is null");
+      throwError(context, error, ErrorCode::InvalidArgument);
       return JSValueMakeUndefined(context);
     }
 
@@ -894,46 +807,35 @@ JSValueRef callNativeFunction(JSContextRef context,
       const std::shared_ptr<Type> &type = signature.args[i];
 
       if (!type || !type->ffi || !type->complete) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " has an unprepared native type");
+        throwError(context, error, ErrorCode::InvalidSignature);
         return JSValueMakeUndefined(context);
       }
 
       if (type->size == 0) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " has zero-sized native storage");
+        throwError(context, error, ErrorCode::InvalidArgument);
         return JSValueMakeUndefined(context);
       }
 
       const std::size_t words = storageWords(type->size);
 
       if (words == 0) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " storage size overflow");
+        throwError(context, error, ErrorCode::IntegerOutOfRange);
         return JSValueMakeUndefined(context);
       }
 
       storage.emplace_back(words);
-
       values.push_back(storage.back().data());
 
       if (!convertArgument(context, arguments[i], type, values.back(), error, i,
-                           stringStorage))
+                           stringStorage)) {
         return JSValueMakeUndefined(context);
+      }
     }
 
     const std::shared_ptr<Type> &returnType = signature.returns;
 
     if (!returnType || !returnType->ffi || !returnType->complete) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': return type is not prepared");
+      throwError(context, error, ErrorCode::InvalidSignature);
       return JSValueMakeUndefined(context);
     }
 
@@ -955,7 +857,7 @@ JSValueRef callNativeFunction(JSContextRef context,
     const std::size_t returnWords = storageWords(returnSize);
 
     if (returnWords == 0) {
-      throwError(context, error, "FFI: native return storage size overflow");
+      throwError(context, error, ErrorCode::IntegerOutOfRange);
       return JSValueMakeUndefined(context);
     }
 
@@ -966,14 +868,13 @@ JSValueRef callNativeFunction(JSContextRef context,
 
     return convertReturn(context, returnType, returnStorage.data(), error);
   } catch (const std::bad_alloc &) {
-    throwError(context, error, "FFI: native call ran out of memory");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native call failed: ") + exception.what());
+  } catch (const std::exception &) {
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   } catch (...) {
-    throwError(context, error, "FFI: native call failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   }
 }

@@ -1,7 +1,10 @@
 #include "ffi_memory.hpp"
 
+#include "ffi_errors.hpp"
+
 #include <cstdlib>
 #include <limits>
+#include <new>
 #include <unordered_map>
 #include <utility>
 
@@ -39,24 +42,6 @@ JSClassRef getPointerClass() {
     return pointerClass;
 }
 
-void throwError(
-    JSContextRef context,
-    JSValueRef* error,
-    const char* message
-) {
-    if (!error)
-        return;
-
-    JSStringRef string = JSStringCreateWithUTF8CString(message);
-
-    *error = JSValueMakeString(
-        context,
-        string
-    );
-
-    JSStringRelease(string);
-}
-
 void externalBufferRelease(
     void* bytes,
     void* deallocatorContext
@@ -66,6 +51,9 @@ void externalBufferRelease(
     auto* state = static_cast<ExternalBufferState*>(
         deallocatorContext
     );
+
+    if (!state)
+        return;
 
     if (state->buffer)
         externalBuffers.erase(state->buffer);
@@ -135,7 +123,14 @@ JSObjectRef makeNativePointer(
     std::shared_ptr<Allocation> allocation,
     JSValueRef rootedValue
 ) {
-    auto* state = new PointerState();
+    PointerState* state = nullptr;
+
+    try {
+        state = new PointerState();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+
     state->address = address;
     state->allocation = std::move(allocation);
 
@@ -190,7 +185,14 @@ JSObjectRef makeExternalArrayBuffer(
         !allocation->data)
         return nullptr;
 
-    auto* state = new ExternalBufferState();
+    ExternalBufferState* state = nullptr;
+
+    try {
+        state = new ExternalBufferState();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+
     state->allocation = std::move(allocation);
 
     JSObjectRef buffer = JSObjectMakeArrayBufferWithBytesNoCopy(
@@ -208,7 +210,16 @@ JSObjectRef makeExternalArrayBuffer(
     }
 
     state->buffer = buffer;
-    externalBuffers.emplace(buffer, state);
+
+    try {
+        externalBuffers.emplace(buffer, state);
+    } catch (const std::bad_alloc&) {
+        /*
+         * The ArrayBuffer now owns the deallocator state.
+         * Do not delete state here because the ArrayBuffer may
+         * invoke externalBufferRelease later.
+         */
+    }
 
     return buffer;
 }
@@ -224,7 +235,11 @@ bool getBufferPointer(
     size = 0;
 
     if (!JSValueIsObject(context, value)) {
-        throwError(context, error, "Expected an ArrayBuffer");
+        throwError(
+            context,
+            error,
+            ErrorCode::InvalidBuffer
+        );
         return false;
     }
 
@@ -237,7 +252,7 @@ bool getBufferPointer(
     );
 
     if (localError) {
-        if (error)
+        if (error && !*error)
             *error = localError;
 
         return false;
@@ -255,20 +270,21 @@ bool getBufferPointer(
             throwError(
                 context,
                 error,
-                "Native memory has already been freed"
+                ErrorCode::FreedMemory
             );
             return false;
         }
     }
 
-    size_t byteLength = JSObjectGetArrayBufferByteLength(
-        context,
-        object,
-        &localError
-    );
+    const std::size_t byteLength =
+        JSObjectGetArrayBufferByteLength(
+            context,
+            object,
+            &localError
+        );
 
     if (localError) {
-        if (error)
+        if (error && !*error)
             *error = localError;
 
         return false;
@@ -281,7 +297,7 @@ bool getBufferPointer(
     );
 
     if (localError) {
-        if (error)
+        if (error && !*error)
             *error = localError;
 
         return false;
@@ -299,15 +315,26 @@ bool getPointerValue(
     std::uintptr_t& address,
     JSValueRef* error
 ) {
-    PointerState* state = getNativePointer(context, value);
+    PointerState* state = getNativePointer(
+        context,
+        value
+    );
 
     if (!state) {
-        throwError(context, error, "Expected NativePointer");
+        throwError(
+            context,
+            error,
+            ErrorCode::ExpectedPointer
+        );
         return false;
     }
 
     if (!state->valid()) {
-        throwError(context, error, "NativePointer is invalid");
+        throwError(
+            context,
+            error,
+            ErrorCode::InvalidPointer
+        );
         return false;
     }
 
@@ -331,21 +358,23 @@ JSValueRef allocateSharedBuffer(
         throwError(
             context,
             error,
-            "allocateSharedBuffer expects one argument"
+            ErrorCode::ArgumentCountMismatch,
+            1,
+            argumentCount
         );
         return nullptr;
     }
 
     JSValueRef localError = nullptr;
 
-    double number = JSValueToNumber(
+    const double number = JSValueToNumber(
         context,
         arguments[0],
         &localError
     );
 
     if (localError) {
-        if (error)
+        if (error && !*error)
             *error = localError;
 
         return nullptr;
@@ -364,18 +393,35 @@ JSValueRef allocateSharedBuffer(
         number != static_cast<double>(
             static_cast<std::size_t>(number)
         )) {
-        throwError(context, error, "Invalid allocation size");
+        throwError(
+            context,
+            error,
+            ErrorCode::InvalidBufferSize
+        );
         return nullptr;
     }
 
-    const std::size_t size = static_cast<std::size_t>(number);
-    auto allocation = std::make_shared<Allocation>(size);
+    const std::size_t size =
+        static_cast<std::size_t>(number);
+
+    std::shared_ptr<Allocation> allocation;
+
+    try {
+        allocation = std::make_shared<Allocation>(size);
+    } catch (const std::bad_alloc&) {
+        throwError(
+            context,
+            error,
+            ErrorCode::AllocationFailed
+        );
+        return nullptr;
+    }
 
     if (size != 0 && !allocation->data) {
         throwError(
             context,
             error,
-            "Native memory allocation failed"
+            ErrorCode::AllocationFailed
         );
         return nullptr;
     }
@@ -406,7 +452,7 @@ JSValueRef allocateSharedBuffer(
         throwError(
             context,
             error,
-            "Failed to create ArrayBuffer"
+            ErrorCode::ObjectCreationFailed
         );
         return nullptr;
     }
@@ -421,7 +467,13 @@ JSValueRef addressOf(
     JSValueRef* error
 ) {
     if (argumentCount != 1) {
-        throwError(context, error, "addressOf expects one argument");
+        throwError(
+            context,
+            error,
+            ErrorCode::ArgumentCountMismatch,
+            1,
+            argumentCount
+        );
         return nullptr;
     }
 
@@ -456,7 +508,7 @@ JSValueRef addressOf(
         throwError(
             context,
             error,
-            "ArrayBuffer does not own native memory"
+            ErrorCode::NotOwnedMemory
         );
         return nullptr;
     }
@@ -468,19 +520,30 @@ JSValueRef addressOf(
         throwError(
             context,
             error,
-            "Native memory has already been freed"
+            ErrorCode::FreedMemory
         );
         return nullptr;
     }
 
     data = allocation->data;
 
-    return makeNativePointer(
+    JSObjectRef pointer = makeNativePointer(
         context,
         reinterpret_cast<std::uintptr_t>(data),
         std::move(allocation),
         arguments[0]
     );
+
+    if (!pointer) {
+        throwError(
+            context,
+            error,
+            ErrorCode::ObjectCreationFailed
+        );
+        return nullptr;
+    }
+
+    return pointer;
 }
 
 JSValueRef freeNativeMemory(
@@ -490,7 +553,13 @@ JSValueRef freeNativeMemory(
     JSValueRef* error
 ) {
     if (argumentCount != 1) {
-        throwError(context, error, "free expects one argument");
+        throwError(
+            context,
+            error,
+            ErrorCode::ArgumentCountMismatch,
+            1,
+            argumentCount
+        );
         return nullptr;
     }
 
@@ -507,7 +576,7 @@ JSValueRef freeNativeMemory(
             throwError(
                 context,
                 error,
-                "Pointer does not own native memory"
+                ErrorCode::NotOwnedMemory
             );
             return nullptr;
         }
@@ -516,7 +585,7 @@ JSValueRef freeNativeMemory(
             throwError(
                 context,
                 error,
-                "Native memory has already been freed"
+                ErrorCode::FreedMemory
             );
             return nullptr;
         }
@@ -552,7 +621,7 @@ JSValueRef freeNativeMemory(
                 throwError(
                     context,
                     error,
-                    "Native memory has already been freed"
+                    ErrorCode::FreedMemory
                 );
                 return nullptr;
             }
@@ -566,7 +635,7 @@ JSValueRef freeNativeMemory(
     throwError(
         context,
         error,
-        "free expects a NativePointer or managed ArrayBuffer"
+        ErrorCode::FreeInvalidArgument
     );
 
     return nullptr;

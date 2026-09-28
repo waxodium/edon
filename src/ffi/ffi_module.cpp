@@ -2,6 +2,7 @@
 
 #include "ffi_call.hpp"
 #include "ffi_callback.hpp"
+#include "ffi_errors.hpp"
 #include "ffi_memory.hpp"
 #include "ffi_native.hpp"
 #include "ffi_types.hpp"
@@ -13,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace edon {
 namespace ffi {
@@ -34,36 +36,13 @@ JSClassRef nativeFunctionClass = nullptr;
 void attachFFIExports(JSContextRef context, JSObjectRef module);
 void attachModuleProperties(JSContextRef context, JSObjectRef module);
 
-JSValueRef makeError(JSContextRef context, const std::string &message) {
-  JSStringRef text = JSStringCreateWithUTF8CString(message.c_str());
-  if (!text)
-    return JSValueMakeUndefined(context);
-
-  JSValueRef args[] = {JSValueMakeString(context, text)};
-  JSObjectRef error = JSObjectMakeError(context, 1, args, nullptr);
-
-  JSStringRelease(text);
-
-  if (!error)
-    return JSValueMakeUndefined(context);
-
-  return error;
-}
-
-void throwError(JSContextRef context, JSValueRef *error,
-                const std::string &message) {
-  if (!error)
-    return;
-
-  *error = makeError(context, message);
-}
-
 std::string toString(JSContextRef context, JSValueRef value,
                      JSValueRef *error) {
   if (!value)
     return {};
 
   JSStringRef string = JSValueToStringCopy(context, value, error);
+
   if (!string)
     return {};
 
@@ -85,6 +64,7 @@ std::string toString(JSContextRef context, JSValueRef value,
     return {};
 
   result.resize(actualSize - 1);
+
   return result;
 }
 
@@ -96,7 +76,8 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object,
   JSStringRef property = JSStringCreateWithUTF8CString(name);
 
   if (!property) {
-    throwError(context, error, "Failed to create property name");
+    throwError(context, error, ErrorCode::PropertyCreationFailed);
+
     return nullptr;
   }
 
@@ -110,7 +91,8 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object,
 bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
                   JSValueRef *error) {
   if (!JSValueIsObject(context, value)) {
-    throwError(context, error, "FFI signature must be an object");
+    throwError(context, error, ErrorCode::InvalidSignature);
+
     return false;
   }
 
@@ -125,7 +107,8 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
     return false;
 
   if (!returnsValue || JSValueIsUndefined(context, returnsValue)) {
-    throwError(context, error, "FFI signature requires 'returns'");
+    throwError(context, error, ErrorCode::MissingReturnType);
+
     return false;
   }
 
@@ -135,14 +118,16 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
     return false;
 
   if (returnName.empty()) {
-    throwError(context, error, "FFI return type cannot be empty");
+    throwError(context, error, ErrorCode::EmptyReturnType);
+
     return false;
   }
 
   std::shared_ptr<Type> returnType = parseTypeName(returnName);
 
   if (!returnType) {
-    throwError(context, error, "Unknown return type: " + returnName);
+    throwError(context, error, ErrorCode::UnknownReturnType, returnName);
+
     return false;
   }
 
@@ -152,7 +137,8 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
     return false;
 
   if (!argsValue || !JSValueIsObject(context, argsValue)) {
-    throwError(context, error, "FFI signature requires 'args' array");
+    throwError(context, error, ErrorCode::MissingArgumentTypes);
+
     return false;
   }
 
@@ -167,7 +153,8 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
     return false;
 
   if (!lengthValue) {
-    throwError(context, error, "Invalid FFI argument list");
+    throwError(context, error, ErrorCode::InvalidArgumentList);
+
     return false;
   }
 
@@ -179,7 +166,8 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
   if (!std::isfinite(lengthNumber) || lengthNumber < 0.0 ||
       std::floor(lengthNumber) != lengthNumber ||
       lengthNumber > static_cast<double>(std::numeric_limits<size_t>::max())) {
-    throwError(context, error, "Invalid FFI argument list");
+    throwError(context, error, ErrorCode::InvalidArgumentList);
+
     return false;
   }
 
@@ -192,12 +180,12 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
   parsedSignature.args.reserve(count);
 
   for (size_t i = 0; i < count; ++i) {
-    const std::string index = std::to_string(i);
-
-    JSStringRef property = JSStringCreateWithUTF8CString(index.c_str());
+    JSStringRef property =
+        JSStringCreateWithUTF8CString(std::to_string(i).c_str());
 
     if (!property) {
-      throwError(context, error, "Failed to create FFI argument property");
+      throwError(context, error, ErrorCode::PropertyCreationFailed);
+
       return false;
     }
 
@@ -210,7 +198,8 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
       return false;
 
     if (!argValue || JSValueIsUndefined(context, argValue)) {
-      throwError(context, error, "Missing FFI argument type at index " + index);
+      throwError(context, error, ErrorCode::MissingArgumentType, i);
+
       return false;
     }
 
@@ -220,15 +209,16 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
       return false;
 
     if (argName.empty()) {
-      throwError(context, error,
-                 "FFI argument type cannot be empty at index " + index);
+      throwError(context, error, ErrorCode::EmptyArgumentType, i);
+
       return false;
     }
 
     std::shared_ptr<Type> type = parseTypeName(argName);
 
     if (!type) {
-      throwError(context, error, "Unknown argument type: [" + argName + "]");
+      throwError(context, error, ErrorCode::UnknownArgumentType, argName);
+
       return false;
     }
 
@@ -236,11 +226,13 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
   }
 
   if (!prepareSignature(parsedSignature)) {
-    throwError(context, error, "Failed to prepare FFI signature");
+    throwError(context, error, ErrorCode::SignaturePreparationFailed);
+
     return false;
   }
 
   signature = std::move(parsedSignature);
+
   return true;
 }
 
@@ -264,7 +256,7 @@ JSValueRef nativeFunctionCall(JSContextRef context, JSObjectRef function,
       static_cast<NativeFunctionHolder *>(JSObjectGetPrivate(function));
 
   if (!holder || !holder->function || !holder->function->address) {
-    throwError(context, error, "Invalid native function");
+    throwError(context, error, ErrorCode::InvalidNativeFunction);
 
     return JSValueMakeUndefined(context);
   }
@@ -277,8 +269,8 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
                            JSObjectRef thisObject, size_t argumentCount,
                            const JSValueRef arguments[], JSValueRef *error) {
   if (argumentCount != 2) {
-    throwError(context, error,
-               "cfunction(name, signature) requires 2 arguments");
+    throwError(context, error, ErrorCode::ArgumentCountMismatch, 2,
+               argumentCount);
 
     return JSValueMakeUndefined(context);
   }
@@ -287,7 +279,7 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
       static_cast<NativeModuleHolder *>(JSObjectGetPrivate(thisObject));
 
   if (!moduleHolder || !moduleHolder->state) {
-    throwError(context, error, "Invalid native module");
+    throwError(context, error, ErrorCode::InvalidNativeModule);
 
     return JSValueMakeUndefined(context);
   }
@@ -298,7 +290,7 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
     return JSValueMakeUndefined(context);
 
   if (name.empty()) {
-    throwError(context, error, "Native function name cannot be empty");
+    throwError(context, error, ErrorCode::EmptyFunctionName);
 
     return JSValueMakeUndefined(context);
   }
@@ -312,7 +304,7 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
   void *address = moduleHolder->state->resolve(name);
 
   if (!address) {
-    throwError(context, error, "Native function not found: " + name);
+    throwError(context, error, ErrorCode::FunctionNotFound, name);
 
     return JSValueMakeUndefined(context);
   }
@@ -321,7 +313,7 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
       std::make_shared<NativeFunctionState>(moduleHolder->state, address, name);
 
   if (!functionState) {
-    throwError(context, error, "Failed to create native function state");
+    throwError(context, error, ErrorCode::FunctionCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
@@ -338,7 +330,7 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
   if (!function) {
     delete functionHolder;
 
-    throwError(context, error, "Failed to create native function");
+    throwError(context, error, ErrorCode::FunctionCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
@@ -393,12 +385,56 @@ JSValueRef freeNativeMemoryFunction(JSContextRef context, JSObjectRef,
   return freeNativeMemory(context, argumentCount, arguments, error);
 }
 
+JSValueRef createCallbackFunction(JSContextRef context, JSObjectRef,
+                                  JSObjectRef, size_t argumentCount,
+                                  const JSValueRef arguments[],
+                                  JSValueRef *error) {
+  if (argumentCount != 2) {
+    throwError(context, error, ErrorCode::ArgumentCountMismatch, 2,
+               argumentCount);
+
+    return JSValueMakeUndefined(context);
+  }
+
+  if (!JSValueIsObject(context, arguments[0])) {
+    throwError(context, error, ErrorCode::ExpectedFunction);
+
+    return JSValueMakeUndefined(context);
+  }
+
+  JSObjectRef function = JSValueToObject(context, arguments[0], error);
+
+  if (!function)
+    return JSValueMakeUndefined(context);
+
+  if (!JSObjectIsFunction(context, function)) {
+    throwError(context, error, ErrorCode::ExpectedFunction);
+
+    return JSValueMakeUndefined(context);
+  }
+
+  Signature signature;
+
+  if (!getSignature(context, arguments[1], signature, error)) {
+    return JSValueMakeUndefined(context);
+  }
+
+  JSObjectRef callback =
+      createCallback(context, function, std::move(signature), error);
+
+  if (!callback)
+    return JSValueMakeUndefined(context);
+
+  return callback;
+}
+
 JSValueRef destroyCallbackFunction(JSContextRef context, JSObjectRef,
                                    JSObjectRef, size_t argumentCount,
                                    const JSValueRef arguments[],
                                    JSValueRef *error) {
   if (argumentCount != 1) {
-    throwError(context, error, "destroyCallback(callback) requires 1 argument");
+    throwError(context, error, ErrorCode::ArgumentCountMismatch, 1,
+               argumentCount);
 
     return JSValueMakeUndefined(context);
   }
@@ -410,7 +446,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
                size_t argumentCount, const JSValueRef arguments[],
                JSValueRef *error) {
   if (argumentCount == 0) {
-    throwError(context, error, "c() requires C source");
+    throwError(context, error, ErrorCode::MissingSource);
 
     return JSValueMakeUndefined(context);
   }
@@ -422,11 +458,9 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
 
     if (error && *error)
       return JSValueMakeUndefined(context);
-
   } else if (JSValueIsObject(context, arguments[0])) {
     if (argumentCount != 1) {
-      throwError(context, error,
-                 "c tagged templates do not support substitutions");
+      throwError(context, error, ErrorCode::TemplateSubstitution);
 
       return JSValueMakeUndefined(context);
     }
@@ -442,7 +476,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
       return JSValueMakeUndefined(context);
 
     if (!first) {
-      throwError(context, error, "c tagged template has no source");
+      throwError(context, error, ErrorCode::MissingSource);
 
       return JSValueMakeUndefined(context);
     }
@@ -451,16 +485,14 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
 
     if (error && *error)
       return JSValueMakeUndefined(context);
-
   } else {
-    throwError(context, error,
-               "c() expects a C source string or tagged template");
+    throwError(context, error, ErrorCode::InvalidSource);
 
     return JSValueMakeUndefined(context);
   }
 
   if (source.empty()) {
-    throwError(context, error, "C source cannot be empty");
+    throwError(context, error, ErrorCode::EmptySource);
 
     return JSValueMakeUndefined(context);
   }
@@ -471,8 +503,22 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
       NativeModuleState::compile(source, compileError);
 
   if (!module) {
-    throwError(context, error,
-               compileError.empty() ? "TCC compilation failed" : compileError);
+    if (!compileError.empty()) {
+      JSStringRef text = JSStringCreateWithUTF8CString(compileError.c_str());
+
+      if (text) {
+        JSValueRef arguments[] = {JSValueMakeString(context, text)};
+
+        *error = JSObjectMakeError(context, 1, arguments, nullptr);
+
+        JSStringRelease(text);
+
+        if (*error)
+          return JSValueMakeUndefined(context);
+      }
+    }
+
+    throwError(context, error, ErrorCode::CompilationFailed);
 
     return JSValueMakeUndefined(context);
   }
@@ -486,7 +532,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
   if (!object) {
     delete holder;
 
-    throwError(context, error, "Failed to create native module");
+    throwError(context, error, ErrorCode::ObjectCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
@@ -500,7 +546,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
                               size_t argumentCount,
                               const JSValueRef arguments[], JSValueRef *error) {
   if (argumentCount != 1 || !JSValueIsString(context, arguments[0])) {
-    throwError(context, error, "loadLibrary(path) requires a path string");
+    throwError(context, error, ErrorCode::InvalidArgument);
 
     return JSValueMakeUndefined(context);
   }
@@ -511,7 +557,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
     return JSValueMakeUndefined(context);
 
   if (path.empty()) {
-    throwError(context, error, "Native module path cannot be empty");
+    throwError(context, error, ErrorCode::EmptyModulePath);
 
     return JSValueMakeUndefined(context);
   }
@@ -522,8 +568,11 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
       NativeModuleState::load(path, loadError);
 
   if (!module) {
-    throwError(context, error,
-               loadError.empty() ? "Failed to load native module" : loadError);
+    if (!loadError.empty()) {
+      throwError(context, error, ErrorCode::ModuleLoadFailed, loadError);
+    } else {
+      throwError(context, error, ErrorCode::ModuleLoadFailed, path);
+    }
 
     return JSValueMakeUndefined(context);
   }
@@ -537,7 +586,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
   if (!object) {
     delete holder;
 
-    throwError(context, error, "Failed to create native module");
+    throwError(context, error, ErrorCode::ObjectCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
@@ -558,6 +607,9 @@ void attachFFIExports(JSContextRef context, JSObjectRef module) {
   setFunctionProperty(context, module, "addressOf", addressOfFunction);
 
   setFunctionProperty(context, module, "free", freeNativeMemoryFunction);
+
+  setFunctionProperty(context, module, "createCallback",
+                      createCallbackFunction);
 
   setFunctionProperty(context, module, "destroyCallback",
                       destroyCallbackFunction);
@@ -600,13 +652,13 @@ void registerNamespace(JSGlobalContextRef context) {
 JSValueRef requireModule(JSContextRef context, const std::string &name,
                          JSValueRef *error) {
   if (name != "edon:ffi") {
-    throwError(context, error, "Cannot find module '" + name + "'");
+    throwError(context, error, ErrorCode::ModuleNotFound, name);
 
     return JSValueMakeUndefined(context);
   }
 
   if (!nativeModuleClass) {
-    throwError(context, error, "FFI module system is not initialized");
+    throwError(context, error, ErrorCode::ModuleSystemUnavailable);
 
     return JSValueMakeUndefined(context);
   }
@@ -614,7 +666,7 @@ JSValueRef requireModule(JSContextRef context, const std::string &name,
   JSObjectRef module = JSObjectMake(context, nullptr, nullptr);
 
   if (!module) {
-    throwError(context, error, "Failed to create FFI module");
+    throwError(context, error, ErrorCode::ObjectCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
