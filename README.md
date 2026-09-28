@@ -11,7 +11,7 @@ Development packages:
 (there are no install scripts, may inconveniently install these packages manually)
 
 ```sh
-git clone https://github.com/waxodium/edon.git
+git clone https://github.com/waxodium/edon.git && cd ./edon
 make
 ./build/edon
 ```
