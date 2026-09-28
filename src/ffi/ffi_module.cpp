@@ -46,6 +46,7 @@ JSValueRef makeError(JSContextRef context, const std::string &message) {
 
   if (!error)
     return JSValueMakeUndefined(context);
+
   return error;
 }
 
@@ -53,6 +54,7 @@ void throwError(JSContextRef context, JSValueRef *error,
                 const std::string &message) {
   if (!error)
     return;
+
   *error = makeError(context, message);
 }
 
@@ -66,6 +68,7 @@ std::string toString(JSContextRef context, JSValueRef value,
     return {};
 
   const size_t maxSize = JSStringGetMaximumUTF8CStringSize(string);
+
   if (maxSize == 0) {
     JSStringRelease(string);
     return {};
@@ -91,6 +94,7 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object,
     return nullptr;
 
   JSStringRef property = JSStringCreateWithUTF8CString(name);
+
   if (!property) {
     throwError(context, error, "Failed to create property name");
     return nullptr;
@@ -99,6 +103,7 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object,
   JSValueRef value = JSObjectGetProperty(context, object, property, error);
 
   JSStringRelease(property);
+
   return value;
 }
 
@@ -110,6 +115,7 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
   }
 
   JSObjectRef object = JSValueToObject(context, value, error);
+
   if (!object)
     return false;
 
@@ -180,7 +186,9 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature,
   const size_t count = static_cast<size_t>(lengthNumber);
 
   Signature parsedSignature;
+
   parsedSignature.returns = std::move(returnType);
+
   parsedSignature.args.reserve(count);
 
   for (size_t i = 0; i < count; ++i) {
@@ -257,6 +265,7 @@ JSValueRef nativeFunctionCall(JSContextRef context, JSObjectRef function,
 
   if (!holder || !holder->function || !holder->function->address) {
     throwError(context, error, "Invalid native function");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -264,11 +273,13 @@ JSValueRef nativeFunctionCall(JSContextRef context, JSObjectRef function,
                             argumentCount, arguments, error);
 }
 
-JSValueRef moduleSymbol(JSContextRef context, JSObjectRef,
-                        JSObjectRef thisObject, size_t argumentCount,
-                        const JSValueRef arguments[], JSValueRef *error) {
+JSValueRef moduleCFunction(JSContextRef context, JSObjectRef,
+                           JSObjectRef thisObject, size_t argumentCount,
+                           const JSValueRef arguments[], JSValueRef *error) {
   if (argumentCount != 2) {
-    throwError(context, error, "symbol(name, signature) requires 2 arguments");
+    throwError(context, error,
+               "cfunction(name, signature) requires 2 arguments");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -277,17 +288,18 @@ JSValueRef moduleSymbol(JSContextRef context, JSObjectRef,
 
   if (!moduleHolder || !moduleHolder->state) {
     throwError(context, error, "Invalid native module");
+
     return JSValueMakeUndefined(context);
   }
 
   std::string name = toString(context, arguments[0], error);
 
-  if (error && *error) {
+  if (error && *error)
     return JSValueMakeUndefined(context);
-  }
 
   if (name.empty()) {
-    throwError(context, error, "Native symbol name cannot be empty");
+    throwError(context, error, "Native function name cannot be empty");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -300,7 +312,8 @@ JSValueRef moduleSymbol(JSContextRef context, JSObjectRef,
   void *address = moduleHolder->state->resolve(name);
 
   if (!address) {
-    throwError(context, error, "Native symbol not found: " + name);
+    throwError(context, error, "Native function not found: " + name);
+
     return JSValueMakeUndefined(context);
   }
 
@@ -309,6 +322,7 @@ JSValueRef moduleSymbol(JSContextRef context, JSObjectRef,
 
   if (!functionState) {
     throwError(context, error, "Failed to create native function state");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -385,6 +399,7 @@ JSValueRef destroyCallbackFunction(JSContextRef context, JSObjectRef,
                                    JSValueRef *error) {
   if (argumentCount != 1) {
     throwError(context, error, "destroyCallback(callback) requires 1 argument");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -396,6 +411,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
                JSValueRef *error) {
   if (argumentCount == 0) {
     throwError(context, error, "c() requires C source");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -404,46 +420,48 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
   if (JSValueIsString(context, arguments[0])) {
     source = toString(context, arguments[0], error);
 
-    if (error && *error) {
+    if (error && *error)
       return JSValueMakeUndefined(context);
-    }
+
   } else if (JSValueIsObject(context, arguments[0])) {
     if (argumentCount != 1) {
       throwError(context, error,
                  "c tagged templates do not support substitutions");
+
       return JSValueMakeUndefined(context);
     }
 
     JSObjectRef strings = JSValueToObject(context, arguments[0], error);
 
-    if (!strings) {
+    if (!strings)
       return JSValueMakeUndefined(context);
-    }
 
     JSValueRef first = getProperty(context, strings, "0", error);
 
-    if (error && *error) {
+    if (error && *error)
       return JSValueMakeUndefined(context);
-    }
 
     if (!first) {
       throwError(context, error, "c tagged template has no source");
+
       return JSValueMakeUndefined(context);
     }
 
     source = toString(context, first, error);
 
-    if (error && *error) {
+    if (error && *error)
       return JSValueMakeUndefined(context);
-    }
+
   } else {
     throwError(context, error,
                "c() expects a C source string or tagged template");
+
     return JSValueMakeUndefined(context);
   }
 
   if (source.empty()) {
     throwError(context, error, "C source cannot be empty");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -455,6 +473,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
   if (!module) {
     throwError(context, error,
                compileError.empty() ? "TCC compilation failed" : compileError);
+
     return JSValueMakeUndefined(context);
   }
 
@@ -473,6 +492,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef,
   }
 
   attachModuleProperties(context, object);
+
   return object;
 }
 
@@ -481,17 +501,18 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
                               const JSValueRef arguments[], JSValueRef *error) {
   if (argumentCount != 1 || !JSValueIsString(context, arguments[0])) {
     throwError(context, error, "loadLibrary(path) requires a path string");
+
     return JSValueMakeUndefined(context);
   }
 
   std::string path = toString(context, arguments[0], error);
 
-  if (error && *error) {
+  if (error && *error)
     return JSValueMakeUndefined(context);
-  }
 
   if (path.empty()) {
     throwError(context, error, "Native module path cannot be empty");
+
     return JSValueMakeUndefined(context);
   }
 
@@ -503,6 +524,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
   if (!module) {
     throwError(context, error,
                loadError.empty() ? "Failed to load native module" : loadError);
+
     return JSValueMakeUndefined(context);
   }
 
@@ -521,6 +543,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef,
   }
 
   attachModuleProperties(context, object);
+
   return object;
 }
 
@@ -543,7 +566,7 @@ void attachFFIExports(JSContextRef context, JSObjectRef module) {
 void attachModuleProperties(JSContextRef context, JSObjectRef module) {
   attachFFIExports(context, module);
 
-  setFunctionProperty(context, module, "symbol", moduleSymbol);
+  setFunctionProperty(context, module, "cfunction", moduleCFunction);
 }
 
 } // namespace
@@ -597,6 +620,7 @@ JSValueRef requireModule(JSContextRef context, const std::string &name,
   }
 
   attachFFIExports(context, module);
+
   return module;
 }
 

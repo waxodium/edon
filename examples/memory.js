@@ -10,12 +10,12 @@ int read_int(int *ptr) {
 }
 `;
 
-const writeInt = native.symbol("write_int", {
+const writeInt = native.cfunction("write_int", {
     returns: "void",
     args: ["pointer", "int32"]
 });
 
-const readInt = native.symbol("read_int", {
+const readInt = native.cfunction("read_int", {
     returns: "int32",
     args: ["pointer"]
 });

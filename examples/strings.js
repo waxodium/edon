@@ -8,7 +8,7 @@ void hello(const char *name) {
 }
 `;
 
-const hello = native.symbol("hello", {
+const hello = native.cfunction("hello", {
     returns: "void",
     args: ["cstring"]
 });

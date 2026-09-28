@@ -2,7 +2,7 @@ const { loadLibrary } = require("edon:ffi");
 
 const libc = loadLibrary("libc.so.6");
 
-const puts = libc.symbol("puts", {
+const puts = libc.cfunction("puts", {
     returns: "int32",
     args: ["cstring"]
 });

@@ -10,7 +10,7 @@ int add(int a, int b) {
 }
 `;
 
-const add = math.symbol("add", {
+const add = math.cfunction("add", {
     returns: "int32",
     args: ["int32", "int32"]
 });
