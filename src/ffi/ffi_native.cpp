@@ -4,225 +4,186 @@
 #include <libtcc.h>
 
 #include <new>
+#include <string>
 #include <utility>
 
 namespace edon {
 namespace ffi {
 
-NativeModuleState::NativeModuleState(
-    NativeModuleKind moduleKind
-)
-    : kind(moduleKind) {
+namespace {
+
+struct CompilerDiagnostic {
+  std::string output;
+};
+
+void compilerErrorCallback(void *opaque, const char *message) {
+  if (!opaque || !message)
+    return;
+
+  auto *diagnostic = static_cast<CompilerDiagnostic *>(opaque);
+
+  diagnostic->output += message;
 }
+
+} // namespace
+
+NativeModuleState::NativeModuleState(NativeModuleKind moduleKind)
+    : kind(moduleKind) {}
 
 NativeModuleState::~NativeModuleState() {
-    if (!handle)
-        return;
+  if (!handle)
+    return;
 
-    if (kind == NativeModuleKind::TCC) {
-        tcc_delete(
-            static_cast<TCCState*>(
-                handle
-            )
-        );
-    } else {
-        dlclose(handle);
-    }
+  if (kind == NativeModuleKind::TCC) {
+    tcc_delete(static_cast<TCCState *>(handle));
+  } else {
+    dlclose(handle);
+  }
 
-    handle = nullptr;
+  handle = nullptr;
 }
 
-void* NativeModuleState::resolve(
-    const std::string& name
-) const {
-    if (!handle ||
-        name.empty()) {
-        return nullptr;
-    }
+void *NativeModuleState::resolve(const std::string &name) const {
+  if (!handle || name.empty()) {
+    return nullptr;
+  }
 
-    if (kind == NativeModuleKind::TCC) {
-        TCCState* state =
-            static_cast<TCCState*>(
-                handle
-            );
+  if (kind == NativeModuleKind::TCC) {
+    TCCState *state = static_cast<TCCState *>(handle);
 
-        return tcc_get_symbol(
-            state,
-            name.c_str()
-        );
-    }
+    return tcc_get_symbol(state, name.c_str());
+  }
 
-    dlerror();
+  dlerror();
 
-    void* address =
-        dlsym(
-            handle,
-            name.c_str()
-        );
+  void *address = dlsym(handle, name.c_str());
 
-    return address;
+  return address;
 }
 
 std::shared_ptr<NativeModuleState>
-NativeModuleState::compile(
-    const std::string& source,
-    std::string& error
-) {
-    error.clear();
+NativeModuleState::compile(const std::string &source, std::string &error,
+                           NativeCompileDiagnostic &diagnostic) {
+  error.clear();
+  diagnostic.message.clear();
+  diagnostic.source = source;
 
-    if (source.empty()) {
-        error =
-            "TCC source is empty";
+  if (source.empty()) {
+    error = "C source is empty";
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 
-    TCCState* state =
-        tcc_new();
+  TCCState *state = tcc_new();
 
-    if (!state) {
-        error =
-            "tcc_new failed";
+  if (!state) {
+    error = "C compiler initialization failed";
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 
-    if (tcc_set_output_type(
-            state,
-            TCC_OUTPUT_MEMORY
-        ) < 0) {
-        error =
-            "TCC output configuration failed";
+  CompilerDiagnostic compilerDiagnostic;
 
-        tcc_delete(state);
+  tcc_set_error_func(state, &compilerDiagnostic, compilerErrorCallback);
 
-        return nullptr;
-    }
+  if (tcc_set_output_type(state, TCC_OUTPUT_MEMORY) < 0) {
+    error = "C compiler output configuration failed";
 
-    if (tcc_compile_string(
-            state,
-            source.c_str()
-        ) < 0) {
-        error =
-            "TCC compilation failed";
+    tcc_delete(state);
 
-        tcc_delete(state);
+    return nullptr;
+  }
 
-        return nullptr;
-    }
+  if (tcc_compile_string(state, source.c_str()) < 0) {
+    error = "C compilation failed";
 
-    if (tcc_relocate(state) < 0) {
-        error =
-            "TCC relocation failed";
+    diagnostic.message = compilerDiagnostic.output;
 
-        tcc_delete(state);
+    tcc_delete(state);
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 
-    try {
-        auto module =
-            std::make_shared<
-                NativeModuleState
-            >(
-                NativeModuleKind::TCC
-            );
+  if (tcc_relocate(state) < 0) {
+    error = "C compilation relocation failed";
 
-        module->handle =
-            state;
+    diagnostic.message = compilerDiagnostic.output;
 
-        return module;
-    } catch (const std::bad_alloc&) {
-        error =
-            "Native module allocation failed";
+    tcc_delete(state);
 
-        tcc_delete(state);
+    return nullptr;
+  }
 
-        return nullptr;
-    } catch (...) {
-        error =
-            "Native module creation failed";
+  try {
+    auto module = std::make_shared<NativeModuleState>(NativeModuleKind::TCC);
 
-        tcc_delete(state);
+    module->handle = state;
 
-        return nullptr;
-    }
+    return module;
+  } catch (const std::bad_alloc &) {
+    error = "Native module allocation failed";
+
+    tcc_delete(state);
+
+    return nullptr;
+  } catch (...) {
+    error = "Native module creation failed";
+
+    tcc_delete(state);
+
+    return nullptr;
+  }
 }
 
 std::shared_ptr<NativeModuleState>
-NativeModuleState::load(
-    const std::string& path,
-    std::string& error
-) {
-    error.clear();
+NativeModuleState::load(const std::string &path, std::string &error) {
+  error.clear();
 
-    if (path.empty()) {
-        error =
-            "Native library path is empty";
+  if (path.empty()) {
+    error = "Native library path is empty";
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 
-    dlerror();
+  dlerror();
 
-    void* handle =
-        dlopen(
-            path.c_str(),
-            RTLD_NOW | RTLD_LOCAL
-        );
+  void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
 
-    if (!handle) {
-        const char* message =
-            dlerror();
+  if (!handle) {
+    const char *message = dlerror();
 
-        error =
-            message
-                ? message
-                : "dlopen failed";
+    error = message ? message : "dlopen failed";
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 
-    try {
-        auto module =
-            std::make_shared<
-                NativeModuleState
-            >(
-                NativeModuleKind::DynamicLibrary
-            );
+  try {
+    auto module =
+        std::make_shared<NativeModuleState>(NativeModuleKind::DynamicLibrary);
 
-        module->handle =
-            handle;
+    module->handle = handle;
 
-        return module;
-    } catch (const std::bad_alloc&) {
-        error =
-            "Native module allocation failed";
+    return module;
+  } catch (const std::bad_alloc &) {
+    error = "Native module allocation failed";
 
-        dlclose(handle);
+    dlclose(handle);
 
-        return nullptr;
-    } catch (...) {
-        error =
-            "Native module creation failed";
+    return nullptr;
+  } catch (...) {
+    error = "Native module creation failed";
 
-        dlclose(handle);
+    dlclose(handle);
 
-        return nullptr;
-    }
+    return nullptr;
+  }
 }
 
 NativeFunctionState::NativeFunctionState(
-    std::shared_ptr<NativeModuleState> nativeModule,
-    void* functionAddress,
-    std::string functionName
-)
-    : module(
-          std::move(nativeModule)
-      ),
-      address(functionAddress),
-      name(std::move(functionName)) {
-}
+    std::shared_ptr<NativeModuleState> nativeModule, void *functionAddress,
+    std::string functionName)
+    : module(std::move(nativeModule)), address(functionAddress),
+      name(std::move(functionName)) {}
 
 } // namespace ffi
 } // namespace edon

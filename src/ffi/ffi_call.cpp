@@ -1,4 +1,6 @@
 #include "ffi_call.hpp"
+#include "ffi_callback.hpp"
+#include "ffi_errors.hpp"
 #include "ffi_memory.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
@@ -6,8 +8,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <limits>
+#include <mutex>
+#include <new>
+#include <setjmp.h>
+#include <signal.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,142 +24,133 @@ namespace ffi {
 
 namespace {
 
-void throwError(JSContextRef context, JSValueRef *error,
-                const std::string &message) {
-  if (!error)
-    return;
+thread_local sigjmp_buf nativeRecoveryEnvironment;
+thread_local volatile sig_atomic_t nativeCallActive = 0;
+thread_local volatile sig_atomic_t nativeSignal = 0;
 
-  JSStringRef string = JSStringCreateWithUTF8CString(message.c_str());
+struct NativeSignalStack {
+  void *memory = nullptr;
+  bool installed = false;
 
-  if (!string) {
-    *error = nullptr;
-    return;
+  ~NativeSignalStack() {
+    if (installed) {
+      stack_t disabled = {};
+      disabled.ss_flags = SS_DISABLE;
+      sigaltstack(&disabled, nullptr);
+    }
+    std::free(memory);
+  }
+};
+
+thread_local NativeSignalStack nativeSignalStack;
+
+void nativeSignalHandler(int signalNumber, siginfo_t *, void *) {
+  if (nativeCallActive) {
+    nativeSignal = signalNumber;
+    siglongjmp(nativeRecoveryEnvironment, 1);
   }
 
-  JSValueRef messageValue = JSValueMakeString(context, string);
-
-  *error = JSObjectMakeError(context, 1, &messageValue, nullptr);
-
-  JSStringRelease(string);
+  struct sigaction action = {};
+  sigemptyset(&action.sa_mask);
+  action.sa_handler = SIG_DFL;
+  sigaction(signalNumber, &action, nullptr);
+  raise(signalNumber);
 }
 
-const char *jsTypeName(JSContextRef context, JSValueRef value) {
-  if (JSValueIsUndefined(context, value))
-    return "undefined";
+bool installNativeSignalHandlers() {
+  static std::once_flag once;
+  static bool installed = false;
 
-  if (JSValueIsNull(context, value))
-    return "null";
+  std::call_once(once, [] {
+    struct sigaction action = {};
+    sigemptyset(&action.sa_mask);
+    action.sa_sigaction = nativeSignalHandler;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
 
-  if (JSValueIsBoolean(context, value))
-    return "boolean";
+    const int signals[] = {SIGSEGV, SIGBUS, SIGFPE};
+    for (int sig : signals) {
+      if (sigaction(sig, &action, nullptr) != 0)
+        return;
+    }
+    installed = true;
+  });
 
-  if (JSValueIsBigInt(context, value))
-    return "bigint";
-
-  if (JSValueIsNumber(context, value))
-    return "number";
-
-  if (JSValueIsString(context, value))
-    return "string";
-
-  if (JSValueIsObject(context, value))
-    return "object";
-
-  return "unknown";
+  return installed;
 }
 
-std::string jsValueDescription(JSContextRef context, JSValueRef value) {
-  if (JSValueIsUndefined(context, value))
-    return "undefined";
+bool installNativeSignalStack() {
+  if (nativeSignalStack.installed)
+    return true;
 
-  if (JSValueIsNull(context, value))
-    return "null";
+  const std::size_t stackSize = SIGSTKSZ > 65536 ? static_cast<std::size_t>(SIGSTKSZ) : 65536;
+  void *memory = std::malloc(stackSize);
+  if (!memory)
+    return false;
 
-  if (JSValueIsBoolean(context, value))
-    return JSValueToBoolean(context, value) ? "true" : "false";
+  stack_t stack = {};
+  stack.ss_sp = memory;
+  stack.ss_size = stackSize;
+  stack.ss_flags = 0;
 
-  JSStringRef string = JSValueToStringCopy(context, value, nullptr);
-
-  if (!string)
-    return jsTypeName(context, value);
-
-  const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
-
-  if (size == 0) {
-    JSStringRelease(string);
-    return jsTypeName(context, value);
+  if (sigaltstack(&stack, nullptr) != 0) {
+    std::free(memory);
+    return false;
   }
 
-  std::vector<char> buffer(size);
-
-  const std::size_t length =
-      JSStringGetUTF8CString(string, buffer.data(), buffer.size());
-
-  JSStringRelease(string);
-
-  if (length == 0)
-    return jsTypeName(context, value);
-
-  return std::string(buffer.data(), length - 1);
+  nativeSignalStack.memory = memory;
+  nativeSignalStack.installed = true;
+  return true;
 }
 
-std::string argumentPrefix(std::size_t index, const char *type) {
-  return "FFI: argument " + std::to_string(index) + " (" + type + ")";
+int invokeProtectedNativeCall(ffi_cif *cif, void (*function)(void), void *result, void **arguments) {
+  if (!installNativeSignalHandlers() || !installNativeSignalStack())
+    return -1;
+
+  nativeSignal = 0;
+  if (sigsetjmp(nativeRecoveryEnvironment, 1) != 0) {
+    nativeCallActive = 0;
+    return static_cast<int>(nativeSignal);
+  }
+
+  nativeCallActive = 1;
+  ffi_call(cif, FFI_FN(function), result, arguments);
+  nativeCallActive = 0;
+  return 0;
 }
 
-bool getNumber(JSContextRef context, JSValueRef value, double &number,
-               JSValueRef *error) {
+bool getNumber(JSContextRef context, JSValueRef value, double &number, JSValueRef *error) {
   JSValueRef localError = nullptr;
   JSValueRef *targetError = error ? error : &localError;
-
   number = JSValueToNumber(context, value, targetError);
-
   return !*targetError;
 }
 
 bool isSafeInteger(double value) {
-  return std::isfinite(value) && std::trunc(value) == value &&
-         value >= -9007199254740991.0 && value <= 9007199254740991.0;
+  return std::isfinite(value) && std::trunc(value) == value && value >= -9007199254740991.0 && value <= 9007199254740991.0;
 }
 
 template <typename T>
-bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output,
-                            JSValueRef *error, const char *type,
-                            std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
-
+bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output, JSValueRef *error) {
   if (!JSValueIsNumber(context, value)) {
-    throwError(context, error,
-               prefix + " requires a Number, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedNumber);
     return false;
   }
 
   double number = 0;
-
   if (!getNumber(context, value, number, error))
     return false;
 
   if (!isSafeInteger(number)) {
-    throwError(context, error,
-               prefix + " requires a safe integer Number; got " +
-                   jsValueDescription(context, value));
+    throwError(context, error, ErrorCode::UnsafeInteger);
     return false;
   }
 
   const long double numericValue = static_cast<long double>(number);
-
-  const long double minimum =
-      static_cast<long double>(std::numeric_limits<T>::lowest());
-
-  const long double maximum =
-      static_cast<long double>(std::numeric_limits<T>::max());
+  const long double minimum = static_cast<long double>(std::numeric_limits<T>::lowest());
+  const long double maximum = static_cast<long double>(std::numeric_limits<T>::max());
 
   if (numericValue < minimum || numericValue > maximum) {
-    throwError(context, error,
-               prefix + " value " + jsValueDescription(context, value) +
-                   " is outside the " + type + " range");
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
@@ -160,61 +158,61 @@ bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output,
   return true;
 }
 
-bool valueToString(JSContextRef context, JSValueRef value, std::string &output,
-                   JSValueRef *error) {
-  JSStringRef string = JSValueToStringCopy(context, value, error);
+bool valueToString(JSContextRef context, JSValueRef value, std::string &output, JSValueRef *error) {
+  JSValueRef localError = nullptr;
+  JSValueRef *targetError = error ? error : &localError;
 
-  if (error && *error)
+  JSStringRef string = JSValueToStringCopy(context, value, targetError);
+  if (*targetError)
     return false;
-
-  if (!string)
-    return false;
-
-  const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
-
-  if (size == 0) {
-    JSStringRelease(string);
+  if (!string) {
+    throwError(context, error, ErrorCode::InvalidValue);
     return false;
   }
 
-  std::vector<char> buffer(size);
+  const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
+  if (size == 0) {
+    JSStringRelease(string);
+    throwError(context, error, ErrorCode::InvalidValue);
+    return false;
+  }
 
-  const std::size_t length =
-      JSStringGetUTF8CString(string, buffer.data(), buffer.size());
+  std::vector<char> buffer;
+  try {
+    buffer.resize(size);
+  } catch (...) {
+    JSStringRelease(string);
+    throwError(context, error, ErrorCode::NativeCallFailed);
+    return false;
+  }
 
+  const std::size_t length = JSStringGetUTF8CString(string, buffer.data(), buffer.size());
   JSStringRelease(string);
 
-  if (length == 0)
+  if (length == 0) {
+    throwError(context, error, ErrorCode::InvalidValue);
     return false;
+  }
 
   output.assign(buffer.data(), length - 1);
-
   return true;
 }
 
-bool parseUnsigned(const std::string &text, uint64_t maximum,
-                   uint64_t &output) {
+bool parseUnsigned(const std::string &text, uint64_t maximum, uint64_t &output) {
   if (text.empty())
     return false;
 
-  std::size_t index = 0;
-
-  if (text[0] == '+')
-    index = 1;
-
+  std::size_t index = (text[0] == '+') ? 1 : 0;
   if (index == text.size())
     return false;
 
   uint64_t result = 0;
-
   for (; index < text.size(); ++index) {
     const char character = text[index];
-
     if (character < '0' || character > '9')
       return false;
 
     const uint64_t digit = static_cast<uint64_t>(character - '0');
-
     if (result > (maximum - digit) / 10)
       return false;
 
@@ -225,8 +223,7 @@ bool parseUnsigned(const std::string &text, uint64_t maximum,
   return true;
 }
 
-bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum,
-                 int64_t &output) {
+bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum, int64_t &output) {
   if (text.empty())
     return false;
 
@@ -244,12 +241,9 @@ bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum,
     return false;
 
   const uint64_t negativeLimit = static_cast<uint64_t>(-(minimum + 1)) + 1;
-
-  const uint64_t limit =
-      negative ? negativeLimit : static_cast<uint64_t>(maximum);
+  const uint64_t limit = negative ? negativeLimit : static_cast<uint64_t>(maximum);
 
   uint64_t magnitude = 0;
-
   if (!parseUnsigned(text.substr(index), limit, magnitude))
     return false;
 
@@ -258,7 +252,6 @@ bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum,
       output = minimum;
       return true;
     }
-
     output = -static_cast<int64_t>(magnitude);
     return true;
   }
@@ -267,371 +260,254 @@ bool parseSigned(const std::string &text, int64_t minimum, int64_t maximum,
   return true;
 }
 
-bool convertBigIntToInt64(JSContextRef context, JSValueRef value,
-                          int64_t &output, JSValueRef *error, const char *type,
-                          std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
-
+bool convertBigIntToInt64(JSContextRef context, JSValueRef value, int64_t &output, JSValueRef *error) {
   if (!JSValueIsBigInt(context, value)) {
-    throwError(context, error, prefix + " requires a BigInt");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
   std::string text;
-
   if (!valueToString(context, value, text, error))
     return false;
 
-  if (!parseSigned(text, std::numeric_limits<int64_t>::min(),
-                   std::numeric_limits<int64_t>::max(), output)) {
-    throwError(context, error,
-               prefix + " BigInt " + text + " is outside the int64 range [" +
-                   std::to_string(std::numeric_limits<int64_t>::min()) + ", " +
-                   std::to_string(std::numeric_limits<int64_t>::max()) + "]");
+  if (!parseSigned(text, std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), output)) {
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
   return true;
 }
 
-bool convertBigIntToUInt64(JSContextRef context, JSValueRef value,
-                           uint64_t &output, JSValueRef *error,
-                           const char *type, std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
-
+bool convertBigIntToUInt64(JSContextRef context, JSValueRef value, uint64_t &output, JSValueRef *error) {
   if (!JSValueIsBigInt(context, value)) {
-    throwError(context, error, prefix + " requires a BigInt");
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
   std::string text;
-
   if (!valueToString(context, value, text, error))
     return false;
 
   if (!parseUnsigned(text, std::numeric_limits<uint64_t>::max(), output)) {
-    throwError(context, error,
-               prefix + " BigInt " + text +
-                   " is outside the uint64 range [0, " +
-                   std::to_string(std::numeric_limits<uint64_t>::max()) + "]");
+    throwError(context, error, ErrorCode::IntegerOutOfRange);
     return false;
   }
 
   return true;
 }
 
-bool convertInt64(JSContextRef context, JSValueRef value, int64_t &output,
-                  JSValueRef *error, const char *type, std::size_t index) {
+bool convertInt64(JSContextRef context, JSValueRef value, int64_t &output, JSValueRef *error) {
   if (JSValueIsBigInt(context, value)) {
-    return convertBigIntToInt64(context, value, output, error, type, index);
+    return convertBigIntToInt64(context, value, output, error);
   }
-
-  return convertNumberToInteger(context, value, output, error, type, index);
+  return convertNumberToInteger(context, value, output, error);
 }
 
-bool convertUInt64(JSContextRef context, JSValueRef value, uint64_t &output,
-                   JSValueRef *error, const char *type, std::size_t index) {
+bool convertUInt64(JSContextRef context, JSValueRef value, uint64_t &output, JSValueRef *error) {
   if (JSValueIsBigInt(context, value)) {
-    return convertBigIntToUInt64(context, value, output, error, type, index);
+    return convertBigIntToUInt64(context, value, output, error);
   }
-
-  return convertNumberToInteger(context, value, output, error, type, index);
+  return convertNumberToInteger(context, value, output, error);
 }
 
 template <typename T>
-bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output,
-                             JSValueRef *error, const char *type,
-                             std::size_t index) {
-  const std::string prefix = argumentPrefix(index, type);
-
+bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output, JSValueRef *error) {
   if (!JSValueIsNumber(context, value)) {
-    throwError(context, error,
-               prefix + " requires a Number, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedNumber);
     return false;
   }
 
   double number = 0;
-
   if (!getNumber(context, value, number, error))
     return false;
 
   if (!std::isfinite(number)) {
-    throwError(context, error,
-               prefix + " requires a finite Number; got " +
-                   jsValueDescription(context, value));
+    throwError(context, error, ErrorCode::InvalidFloat);
     return false;
   }
 
   output = static_cast<T>(number);
-
   if (!std::isfinite(static_cast<double>(output))) {
-    throwError(context, error,
-               prefix + " value " + jsValueDescription(context, value) +
-                   " is outside the representable range of " + type);
+    throwError(context, error, ErrorCode::FloatOverflow);
     return false;
   }
 
   return true;
 }
 
-bool convertPointerArgument(JSContextRef context, JSValueRef value,
-                            void *destination, JSValueRef *error,
-                            std::size_t index) {
-  const std::string prefix = argumentPrefix(index, "pointer");
-
+bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destination, JSValueRef *error) {
   if (JSValueIsNull(context, value)) {
     *static_cast<void **>(destination) = nullptr;
     return true;
   }
 
   if (JSValueIsObject(context, value)) {
-    PointerState *pointer = getNativePointer(context, value);
-
-    if (pointer) {
-      std::uintptr_t address = 0;
-
-      if (!getPointerValue(context, value, address, error))
-        return false;
-
-      if (address == 0) {
-        throwError(context, error, prefix + " contains a null NativePointer");
+    if (CallbackState *callback = getCallbackState(context, value)) {
+      if (!callback->alive || callback->destroyed || !callback->executable) {
+        throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
         return false;
       }
-
-      *static_cast<void **>(destination) = reinterpret_cast<void *>(address);
-
+      *static_cast<void **>(destination) = callback->executable;
       return true;
+    }
+
+    if (getNativePointer(context, value)) {
+        std::uintptr_t address = 0;
+
+        if (!getPointerValue(context, value, address, error))
+            return false;
+
+        if (address == 0) {
+            throwError(context, error, ErrorCode::NullPointer);
+            return false;
+        }
+
+        *static_cast<void **>(destination) = reinterpret_cast<void *>(address);
+        return true;
     }
 
     void *data = nullptr;
     std::size_t size = 0;
-
     if (getBufferPointer(context, value, data, size, nullptr)) {
-      (void)size;
-
       if (!data) {
-        throwError(context, error,
-                   prefix + " references an empty native ArrayBuffer");
+        throwError(context, error, ErrorCode::InvalidPointer);
         return false;
       }
-
       *static_cast<void **>(destination) = data;
       return true;
     }
   }
 
-  throwError(context, error,
-             prefix + " requires a NativePointer, native ArrayBuffer, or null");
-
+  throwError(context, error, ErrorCode::ExpectedPointer);
   return false;
 }
 
-bool convertCStringArgument(JSContextRef context, JSValueRef value,
-                            void *destination,
-                            std::vector<std::vector<char>> &stringStorage,
-                            JSValueRef *error, std::size_t index) {
-  const std::string prefix = argumentPrefix(index, "cstring");
-
+bool convertCStringArgument(JSContextRef context, JSValueRef value, void *destination, std::vector<std::vector<char>> &stringStorage, JSValueRef *error) {
   if (JSValueIsNull(context, value)) {
     *static_cast<const char **>(destination) = nullptr;
     return true;
   }
 
   if (!JSValueIsString(context, value)) {
-    throwError(context, error,
-               prefix + " requires a String or null, got " +
-                   jsTypeName(context, value) + " (" +
-                   jsValueDescription(context, value) + ")");
+    throwError(context, error, ErrorCode::ExpectedString);
     return false;
   }
 
-  JSStringRef string = JSValueToStringCopy(context, value, error);
+  JSValueRef localError = nullptr;
+  JSValueRef *targetError = error ? error : &localError;
 
-  if (error && *error)
+  JSStringRef string = JSValueToStringCopy(context, value, targetError);
+  if (*targetError)
     return false;
-
   if (!string) {
-    throwError(context, error, prefix + " could not convert string");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
   const std::size_t size = JSStringGetMaximumUTF8CStringSize(string);
-
   if (size == 0) {
     JSStringRelease(string);
-
-    throwError(context, error, prefix + " string conversion failed");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
-  std::vector<char> storage(size);
+  std::vector<char> storage;
+  try {
+    storage.resize(size);
+  } catch (...) {
+    JSStringRelease(string);
+    throwError(context, error, ErrorCode::NativeCallFailed);
+    return false;
+  }
 
-  const std::size_t length =
-      JSStringGetUTF8CString(string, storage.data(), storage.size());
-
+  const std::size_t length = JSStringGetUTF8CString(string, storage.data(), storage.size());
   JSStringRelease(string);
 
   if (length == 0) {
-    throwError(context, error, prefix + " string conversion failed");
+    throwError(context, error, ErrorCode::InvalidCString);
     return false;
   }
 
   stringStorage.push_back(std::move(storage));
-
   *static_cast<const char **>(destination) = stringStorage.back().data();
-
   return true;
 }
 
-bool convertArgument(JSContextRef context, JSValueRef value,
-                     const std::shared_ptr<Type> &type, void *destination,
-                     JSValueRef *error, std::size_t index,
-                     std::vector<std::vector<char>> &stringStorage) {
-  if (!type) {
-    throwError(context, error,
-               "FFI: argument " + std::to_string(index) +
-                   " has no native type");
-    return false;
-  }
-
-  if (!destination) {
-    throwError(context, error,
-               "FFI: argument " + std::to_string(index) +
-                   " has no native storage");
+bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_ptr<Type> &type, void *destination, JSValueRef *error, std::vector<std::vector<char>> &stringStorage) {
+  if (!type || !destination) {
+    throwError(context, error, ErrorCode::InvalidArgument);
     return false;
   }
 
   switch (type->kind) {
   case TypeKind::Bool:
     if (!JSValueIsBoolean(context, value)) {
-      throwError(context, error,
-                 argumentPrefix(index, "bool") + " requires a Boolean, got " +
-                     jsTypeName(context, value) + " (" +
-                     jsValueDescription(context, value) + ")");
+      throwError(context, error, ErrorCode::InvalidArgument);
       return false;
     }
-
-    *static_cast<uint8_t *>(destination) =
-        JSValueToBoolean(context, value) ? 1 : 0;
-
+    *static_cast<uint8_t *>(destination) = JSValueToBoolean(context, value) ? 1 : 0;
     return true;
 
   case TypeKind::Int8:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<int8_t *>(destination), error,
-                                  "int8", index);
-
+    return convertNumberToInteger(context, value, *static_cast<int8_t *>(destination), error);
   case TypeKind::UInt8:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<uint8_t *>(destination), error,
-                                  "uint8", index);
-
+    return convertNumberToInteger(context, value, *static_cast<uint8_t *>(destination), error);
   case TypeKind::Int16:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<int16_t *>(destination), error,
-                                  "int16", index);
-
+    return convertNumberToInteger(context, value, *static_cast<int16_t *>(destination), error);
   case TypeKind::UInt16:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<uint16_t *>(destination), error,
-                                  "uint16", index);
-
+    return convertNumberToInteger(context, value, *static_cast<uint16_t *>(destination), error);
   case TypeKind::Int32:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<int32_t *>(destination), error,
-                                  "int32", index);
-
+    return convertNumberToInteger(context, value, *static_cast<int32_t *>(destination), error);
   case TypeKind::UInt32:
-    return convertNumberToInteger(context, value,
-                                  *static_cast<uint32_t *>(destination), error,
-                                  "uint32", index);
-
+    return convertNumberToInteger(context, value, *static_cast<uint32_t *>(destination), error);
   case TypeKind::Int64:
-    return convertInt64(context, value, *static_cast<int64_t *>(destination),
-                        error, "int64", index);
-
+    return convertInt64(context, value, *static_cast<int64_t *>(destination), error);
   case TypeKind::UInt64:
-    return convertUInt64(context, value, *static_cast<uint64_t *>(destination),
-                         error, "uint64", index);
+    return convertUInt64(context, value, *static_cast<uint64_t *>(destination), error);
 
   case TypeKind::Size:
     if (sizeof(std::size_t) == sizeof(uint64_t)) {
       uint64_t converted = 0;
-
-      if (!convertUInt64(context, value, converted, error, "size", index))
+      if (!convertUInt64(context, value, converted, error))
         return false;
-
-      *static_cast<std::size_t *>(destination) =
-          static_cast<std::size_t>(converted);
-
+      *static_cast<std::size_t *>(destination) = static_cast<std::size_t>(converted);
       return true;
     }
-
-    return convertNumberToInteger(context, value,
-                                  *static_cast<std::size_t *>(destination),
-                                  error, "size", index);
+    return convertNumberToInteger(context, value, *static_cast<std::size_t *>(destination), error);
 
   case TypeKind::SSize:
     if (sizeof(std::ptrdiff_t) == sizeof(int64_t)) {
       int64_t converted = 0;
-
-      if (!convertInt64(context, value, converted, error, "ssize", index))
+      if (!convertInt64(context, value, converted, error))
         return false;
-
-      *static_cast<std::ptrdiff_t *>(destination) =
-          static_cast<std::ptrdiff_t>(converted);
-
+      *static_cast<std::ptrdiff_t *>(destination) = static_cast<std::ptrdiff_t>(converted);
       return true;
     }
-
-    return convertNumberToInteger(context, value,
-                                  *static_cast<std::ptrdiff_t *>(destination),
-                                  error, "ssize", index);
+    return convertNumberToInteger(context, value, *static_cast<std::ptrdiff_t *>(destination), error);
 
   case TypeKind::Float:
-    return convertNumberToFloating(context, value,
-                                   *static_cast<float *>(destination), error,
-                                   "float", index);
-
+    return convertNumberToFloating(context, value, *static_cast<float *>(destination), error);
   case TypeKind::Double:
-    return convertNumberToFloating(context, value,
-                                   *static_cast<double *>(destination), error,
-                                   "double", index);
-
+    return convertNumberToFloating(context, value, *static_cast<double *>(destination), error);
   case TypeKind::Pointer:
-    return convertPointerArgument(context, value, destination, error, index);
-
+    return convertPointerArgument(context, value, destination, error);
   case TypeKind::CString:
-    return convertCStringArgument(context, value, destination, stringStorage,
-                                  error, index);
+    return convertCStringArgument(context, value, destination, stringStorage, error);
 
   case TypeKind::Void:
-    throwError(context, error,
-               argumentPrefix(index, "void") + " is not a valid argument type");
-    return false;
-
   case TypeKind::Struct:
   case TypeKind::Array:
-    throwError(context, error,
-               argumentPrefix(index, typeName(type->kind)) +
-                   " is not supported by the native call layer");
+    throwError(context, error, ErrorCode::UnsupportedArgumentType);
     return false;
   }
 
-  throwError(context, error,
-             "FFI: argument " + std::to_string(index) +
-                 " has an unknown native type");
-
+  throwError(context, error, ErrorCode::InvalidArgument);
   return false;
 }
 
-JSValueRef convertReturn(JSContextRef context,
-                         const std::shared_ptr<Type> &type, const void *value,
-                         JSValueRef *error) {
+JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type, const void *value, JSValueRef *error) {
   if (!type) {
-    throwError(context, error, "FFI: native function has no return type");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return JSValueMakeUndefined(context);
   }
 
@@ -639,75 +515,44 @@ JSValueRef convertReturn(JSContextRef context,
     return JSValueMakeUndefined(context);
 
   if (!value) {
-    throwError(context, error,
-               "FFI: native function returned without valid storage");
+    throwError(context, error, ErrorCode::InvalidValue);
     return JSValueMakeUndefined(context);
   }
 
   switch (type->kind) {
   case TypeKind::Bool:
-    return JSValueMakeBoolean(context,
-                              *static_cast<const uint8_t *>(value) != 0);
-
+    return JSValueMakeBoolean(context, *static_cast<const uint8_t *>(value) != 0);
   case TypeKind::Int8:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const int8_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int8_t *>(value)));
   case TypeKind::UInt8:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const uint8_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const uint8_t *>(value)));
   case TypeKind::Int16:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const int16_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int16_t *>(value)));
   case TypeKind::UInt16:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const uint16_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const uint16_t *>(value)));
   case TypeKind::Int32:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const int32_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int32_t *>(value)));
   case TypeKind::UInt32:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const uint32_t *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const uint32_t *>(value)));
   case TypeKind::Int64:
-    return JSBigIntCreateWithInt64(context,
-                                   *static_cast<const int64_t *>(value), error);
-
+    return JSBigIntCreateWithInt64(context, *static_cast<const int64_t *>(value), error);
   case TypeKind::UInt64:
-    return JSBigIntCreateWithUInt64(
-        context, *static_cast<const uint64_t *>(value), error);
+    return JSBigIntCreateWithUInt64(context, *static_cast<const uint64_t *>(value), error);
 
   case TypeKind::Size:
     if (sizeof(std::size_t) == sizeof(uint64_t)) {
-      return JSBigIntCreateWithUInt64(
-          context,
-          static_cast<uint64_t>(*static_cast<const std::size_t *>(value)),
-          error);
+      return JSBigIntCreateWithUInt64(context, static_cast<uint64_t>(*static_cast<const std::size_t *>(value)), error);
     }
-
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const std::size_t *>(value)));
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const std::size_t *>(value)));
 
   case TypeKind::SSize:
     if (sizeof(std::ptrdiff_t) == sizeof(int64_t)) {
-      return JSBigIntCreateWithInt64(
-          context,
-          static_cast<int64_t>(*static_cast<const std::ptrdiff_t *>(value)),
-          error);
+      return JSBigIntCreateWithInt64(context, static_cast<int64_t>(*static_cast<const std::ptrdiff_t *>(value)), error);
     }
-
-    return JSValueMakeNumber(
-        context,
-        static_cast<double>(*static_cast<const std::ptrdiff_t *>(value)));
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const std::ptrdiff_t *>(value)));
 
   case TypeKind::Float:
-    return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const float *>(value)));
-
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const float *>(value)));
   case TypeKind::Double:
     return JSValueMakeNumber(context, *static_cast<const double *>(value));
 
@@ -715,91 +560,62 @@ JSValueRef convertReturn(JSContextRef context,
   case TypeKind::CString:
   case TypeKind::Struct:
   case TypeKind::Array:
-    throwError(context, error,
-               "FFI: native return type " + std::string(typeName(type->kind)) +
-                   " is not supported by the native call layer");
+    throwError(context, error, ErrorCode::UnsupportedReturnType);
     return JSValueMakeUndefined(context);
 
   case TypeKind::Void:
     return JSValueMakeUndefined(context);
   }
 
-  throwError(context, error, "FFI: native function has an unknown native type");
-
+  throwError(context, error, ErrorCode::InvalidValue);
   return JSValueMakeUndefined(context);
 }
 
 std::size_t storageWords(std::size_t size) {
   const std::size_t wordSize = sizeof(std::max_align_t);
-
   if (size == 0)
     return 1;
-
   if (size > std::numeric_limits<std::size_t>::max() - (wordSize - 1))
     return 0;
-
   return (size + wordSize - 1) / wordSize;
 }
 
-bool validateSignature(JSContextRef context, const Signature &signature,
-                       JSValueRef *error) {
+bool validateSignature(JSContextRef context, const Signature &signature, JSValueRef *error) {
   if (!signature.prepared) {
-    throwError(context, error, "FFI: libffi signature has not been prepared");
+    throwError(context, error, ErrorCode::SignaturePreparationFailed);
     return false;
   }
 
-  if (!signature.returns || !signature.returns->ffi ||
-      !signature.returns->complete) {
-    throwError(context, error,
-               "FFI: libffi signature has no valid return type");
+  if (!signature.returns || !signature.returns->ffi || !signature.returns->complete) {
+    throwError(context, error, ErrorCode::InvalidSignature);
     return false;
   }
 
-  if (signature.args.size() != signature.ffiArgs.size()) {
-    throwError(context, error,
-               "FFI: prepared signature argument count is invalid");
-    return false;
-  }
-
-  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) {
-    throwError(context, error, "FFI: signature contains too many arguments");
-    return false;
-  }
-
-  if (signature.cif.nargs != static_cast<unsigned int>(signature.args.size())) {
-    throwError(context, error,
-               "FFI: prepared libffi argument count is invalid");
-    return false;
-  }
-
-  if (signature.cif.rtype != signature.returns->ffi) {
-    throwError(context, error, "FFI: prepared libffi return type is invalid");
+  if (signature.args.size() != signature.ffiArgs.size() ||
+      signature.args.size() > std::numeric_limits<unsigned int>::max() ||
+      signature.cif.nargs != static_cast<unsigned int>(signature.args.size()) ||
+      signature.cif.rtype != signature.returns->ffi) {
+    throwError(context, error, ErrorCode::InvalidArgumentList);
     return false;
   }
 
   if (signature.args.empty()) {
     if (signature.cif.arg_types != nullptr) {
-      throwError(context, error,
-                 "FFI: prepared libffi argument storage is invalid");
+      throwError(context, error, ErrorCode::InvalidSignature);
       return false;
     }
-
     return true;
   }
 
   if (signature.cif.arg_types != signature.ffiArgs.data()) {
-    throwError(context, error,
-               "FFI: prepared libffi argument storage is invalid");
+    throwError(context, error, ErrorCode::InvalidSignature);
     return false;
   }
 
   for (std::size_t i = 0; i < signature.args.size(); ++i) {
     const std::shared_ptr<Type> &type = signature.args[i];
-
-    if (!type || !type->ffi || !type->complete ||
-        signature.ffiArgs[i] != type->ffi) {
-      throwError(context, error,
-                 "FFI: prepared libffi argument type is invalid");
+    if (!type || !type->ffi || !type->complete || signature.ffiArgs[i] != type->ffi) {
+      throwError(context, error, ErrorCode::InvalidSignature);
       return false;
     }
   }
@@ -809,58 +625,29 @@ bool validateSignature(JSContextRef context, const Signature &signature,
 
 } // namespace
 
-bool jsValueToNative(JSContextRef context, JSValueRef value,
-                     const std::shared_ptr<Type> &type, void *destination,
-                     JSValueRef *error) {
+bool jsValueToNative(JSContextRef context, JSValueRef value, const std::shared_ptr<Type> &type, void *destination, JSValueRef *error) {
   try {
     std::vector<std::vector<char>> stringStorage;
-
-    return convertArgument(context, value, type, destination, error, 0,
-                           stringStorage);
-  } catch (const std::bad_alloc &) {
-    throwError(context, error,
-               "FFI: native argument conversion ran out of memory");
-    return false;
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native argument conversion failed: ") +
-                   exception.what());
-    return false;
+    return convertArgument(context, value, type, destination, error, stringStorage);
   } catch (...) {
-    throwError(context, error, "FFI: native argument conversion failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return false;
   }
 }
 
-JSValueRef nativeToJSValue(JSContextRef context,
-                           const std::shared_ptr<Type> &type, const void *value,
-                           JSValueRef *error) {
+JSValueRef nativeToJSValue(JSContextRef context, const std::shared_ptr<Type> &type, const void *value, JSValueRef *error) {
   try {
     return convertReturn(context, type, value, error);
-  } catch (const std::bad_alloc &) {
-    throwError(context, error,
-               "FFI: native return conversion ran out of memory");
-    return JSValueMakeUndefined(context);
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native return conversion failed: ") +
-                   exception.what());
-    return JSValueMakeUndefined(context);
   } catch (...) {
-    throwError(context, error, "FFI: native return conversion failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   }
 }
 
-JSValueRef callNativeFunction(JSContextRef context,
-                              const NativeFunctionState &function,
-                              const Signature &signature, size_t argumentCount,
-                              const JSValueRef arguments[], JSValueRef *error) {
+JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &function, const Signature &signature, size_t argumentCount, const JSValueRef arguments[], JSValueRef *error) {
   try {
     if (!function.address) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': symbol address is null");
+      throwError(context, error, ErrorCode::InvalidNativeFunction);
       return JSValueMakeUndefined(context);
     }
 
@@ -868,17 +655,12 @@ JSValueRef callNativeFunction(JSContextRef context,
       return JSValueMakeUndefined(context);
 
     if (argumentCount != signature.args.size()) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': expected " + std::to_string(signature.args.size()) +
-                     " argument(s), received " + std::to_string(argumentCount));
+      throwError(context, error, ErrorCode::ArgumentCountMismatch, signature.args.size(), argumentCount);
       return JSValueMakeUndefined(context);
     }
 
     if (argumentCount != 0 && !arguments) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': argument storage is null");
+      throwError(context, error, ErrorCode::InvalidArgument);
       return JSValueMakeUndefined(context);
     }
 
@@ -894,86 +676,70 @@ JSValueRef callNativeFunction(JSContextRef context,
       const std::shared_ptr<Type> &type = signature.args[i];
 
       if (!type || !type->ffi || !type->complete) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " has an unprepared native type");
+        throwError(context, error, ErrorCode::InvalidSignature);
         return JSValueMakeUndefined(context);
       }
 
       if (type->size == 0) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " has zero-sized native storage");
+        throwError(context, error, ErrorCode::InvalidArgument);
         return JSValueMakeUndefined(context);
       }
 
       const std::size_t words = storageWords(type->size);
-
       if (words == 0) {
-        throwError(context, error,
-                   "FFI: cannot call native function '" + function.name +
-                       "': argument " + std::to_string(i) +
-                       " storage size overflow");
+        throwError(context, error, ErrorCode::IntegerOutOfRange);
         return JSValueMakeUndefined(context);
       }
 
       storage.emplace_back(words);
-
       values.push_back(storage.back().data());
 
-      if (!convertArgument(context, arguments[i], type, values.back(), error, i,
-                           stringStorage))
+      if (!convertArgument(context, arguments[i], type, values.back(), error, stringStorage)) {
         return JSValueMakeUndefined(context);
+      }
     }
 
     const std::shared_ptr<Type> &returnType = signature.returns;
-
     if (!returnType || !returnType->ffi || !returnType->complete) {
-      throwError(context, error,
-                 "FFI: cannot call native function '" + function.name +
-                     "': return type is not prepared");
+      throwError(context, error, ErrorCode::InvalidSignature);
       return JSValueMakeUndefined(context);
     }
 
     ffi_cif *cif = const_cast<ffi_cif *>(&signature.cif);
-
     void **argumentValues = values.empty() ? nullptr : values.data();
 
     if (returnType->kind == TypeKind::Void) {
-      ffi_call(cif, FFI_FN(function.address), nullptr, argumentValues);
+      const int signalNumber = invokeProtectedNativeCall(cif, reinterpret_cast<void (*)(void)>(function.address), nullptr, argumentValues);
+
+      if (signalNumber != 0) {
+        throwError(context, error, signalNumber == SIGSEGV ? ErrorCode::NativeSegmentationFault : ErrorCode::NativeCrash);
+        return JSValueMakeUndefined(context);
+      }
 
       return JSValueMakeUndefined(context);
     }
 
     std::size_t returnSize = returnType->size;
-
     if (returnSize < sizeof(ffi_arg))
       returnSize = sizeof(ffi_arg);
 
     const std::size_t returnWords = storageWords(returnSize);
-
     if (returnWords == 0) {
-      throwError(context, error, "FFI: native return storage size overflow");
+      throwError(context, error, ErrorCode::IntegerOutOfRange);
       return JSValueMakeUndefined(context);
     }
 
     std::vector<std::max_align_t> returnStorage(returnWords);
+    const int signalNumber = invokeProtectedNativeCall(cif, reinterpret_cast<void (*)(void)>(function.address), returnStorage.data(), argumentValues);
 
-    ffi_call(cif, FFI_FN(function.address), returnStorage.data(),
-             argumentValues);
+    if (signalNumber != 0) {
+      throwError(context, error, signalNumber == SIGSEGV ? ErrorCode::NativeSegmentationFault : ErrorCode::NativeCrash);
+      return JSValueMakeUndefined(context);
+    }
 
     return convertReturn(context, returnType, returnStorage.data(), error);
-  } catch (const std::bad_alloc &) {
-    throwError(context, error, "FFI: native call ran out of memory");
-    return JSValueMakeUndefined(context);
-  } catch (const std::exception &exception) {
-    throwError(context, error,
-               std::string("FFI: native call failed: ") + exception.what());
-    return JSValueMakeUndefined(context);
   } catch (...) {
-    throwError(context, error, "FFI: native call failed");
+    throwError(context, error, ErrorCode::NativeCallFailed);
     return JSValueMakeUndefined(context);
   }
 }

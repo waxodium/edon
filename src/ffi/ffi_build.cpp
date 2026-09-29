@@ -7,10 +7,7 @@
 namespace edon {
 namespace ffi {
 
-BuildResult buildNativeSource(
-    const std::string& source,
-    const BuildOptions& options
-) {
+BuildResult buildNativeSource(const std::string& source, const BuildOptions& options) {
     BuildResult result;
 
     if (options.outputPath.empty()) {
@@ -20,20 +17,13 @@ BuildResult buildNativeSource(
         return result;
     }
 
-    /*
-     * Native source compilation 
-     *
-     *  Ahh, documentation? Later.
-     *
-     *  It is optional to use 
-     *  agent for assistance to scrape
-     *  this git repository.
-     */
+
     (void)source;
     (void)options;
 
-    result.error =
-        "External native build integration is not implemented";
+    // w.i.p
+
+    result.error = "External native build integration is not implemented (w.i.p)";
 
     return result;
 }

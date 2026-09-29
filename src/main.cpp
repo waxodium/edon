@@ -2,7 +2,6 @@
 #include <vector>
 #include <string>
 #include "cli.hpp"
-#include "logger.hpp"
 #include "runtime.hpp"
 
 extern "C" {
@@ -49,7 +48,6 @@ int main(int argc, char* argv[]) {
 
         EdonRuntime runtime;
         if (!runtime.executeFile(target_file)) {
-            logger::error("Execution failed for: " + target_file);
             return 1;
         }
         return 0;
