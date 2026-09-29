@@ -13,23 +13,20 @@ namespace {
 std::string trim(const std::string &value) {
   std::size_t first = 0;
 
-  while (first < value.size() &&
-         std::isspace(static_cast<unsigned char>(value[first]))) {
+  while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) {
     ++first;
   }
 
   std::size_t last = value.size();
 
-  while (last > first &&
-         std::isspace(static_cast<unsigned char>(value[last - 1]))) {
+  while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) {
     --last;
   }
 
   return value.substr(first, last - first);
 }
 
-bool splitFunction(const std::string &source, std::string &returnType,
-                   std::string &name, std::string &arguments) {
+bool splitFunction(const std::string &source, std::string &returnType, std::string &name, std::string &arguments) {
   const std::size_t open = source.find('(');
   const std::size_t close = source.rfind(')');
 
@@ -53,10 +50,8 @@ bool splitFunction(const std::string &source, std::string &returnType,
 
 } // namespace
 
-bool parseType(const std::string &source, std::shared_ptr<Type> &type,
-               std::string &error) {
+bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::string &error) {
   const std::string value = trim(source);
-
   type = parseTypeName(value);
 
   if (!type) {
@@ -67,8 +62,7 @@ bool parseType(const std::string &source, std::shared_ptr<Type> &type,
   return true;
 }
 
-bool parseFunctionDeclaration(const std::string &source,
-                              ParsedFunction &function, std::string &error) {
+bool parseFunctionDeclaration(const std::string &source, ParsedFunction &function, std::string &error) {
   function = {};
 
   const std::string declaration = trim(source);
@@ -139,8 +133,7 @@ bool parseFunctionDeclaration(const std::string &source,
   return true;
 }
 
-bool parseCSource(const std::string &source, ParsedCSource &result,
-                  std::string &error) {
+bool parseCSource(const std::string &source, ParsedCSource &result, std::string &error) {
   result = {};
 
   const std::string input = trim(source);

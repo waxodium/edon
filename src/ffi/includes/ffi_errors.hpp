@@ -71,6 +71,7 @@ enum class ErrorCode {
     CallbackCreationFailed,
     NativeCallFailed,
     NativeCrash,
+    NativeSegmentationFault,
     ObjectCreationFailed,
     PropertyCreationFailed,
     FunctionCreationFailed,
@@ -108,18 +109,28 @@ std::string formatError(ErrorCode code, const std::string& value, std::size_t in
 std::string formatError(ErrorCode code, const std::string& value, int number);
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code);
-JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string& value);
-JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t value);
-JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t first, std::size_t second);
-JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string& value, std::size_t index);
-JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string& value, int number);
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      const std::string& value);
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      std::size_t value);
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      std::size_t first, std::size_t second);
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      const std::string& value, std::size_t index);
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      const std::string& value, int number);
 
 void throwError(JSContextRef context, JSValueRef* error, ErrorCode code);
-void throwError(JSContextRef context, JSValueRef* error, ErrorCode code, const std::string& value);
-void throwError(JSContextRef context, JSValueRef* error, ErrorCode code, std::size_t value);
-void throwError(JSContextRef context, JSValueRef* error, ErrorCode code, std::size_t first, std::size_t second);
-void throwError(JSContextRef context, JSValueRef* error, ErrorCode code, const std::string& value, std::size_t index);
-void throwError(JSContextRef context, JSValueRef* error, ErrorCode code, const std::string& value, int number);
+void throwError(JSContextRef context, JSValueRef* error, ErrorCode code,
+                const std::string& value);
+void throwError(JSContextRef context, JSValueRef* error, ErrorCode code,
+                std::size_t value);
+void throwError(JSContextRef context, JSValueRef* error, ErrorCode code,
+                std::size_t first, std::size_t second);
+void throwError(JSContextRef context, JSValueRef* error, ErrorCode code,
+                const std::string& value, std::size_t index);
+void throwError(JSContextRef context, JSValueRef* error, ErrorCode code,
+                const std::string& value, int number);
 
 JSObjectRef makeCompilationError(
     JSContextRef context,

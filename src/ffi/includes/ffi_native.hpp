@@ -13,6 +13,11 @@ enum class NativeModuleKind {
     DynamicLibrary
 };
 
+struct NativeCompileDiagnostic {
+    std::string message;
+    std::string source;
+};
+
 struct NativeModuleState {
     NativeModuleKind kind;
 
@@ -28,7 +33,8 @@ struct NativeModuleState {
 
     static std::shared_ptr<NativeModuleState> compile(
         const std::string& source,
-        std::string& error
+        std::string& error,
+        NativeCompileDiagnostic& diagnostic
     );
 
     static std::shared_ptr<NativeModuleState> load(

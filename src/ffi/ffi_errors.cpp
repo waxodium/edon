@@ -120,6 +120,8 @@ const std::unordered_map<ErrorCode, ErrorDefinition> &definitions() {
        {"NativeCallError", "Native function call failed"}},
       {ErrorCode::NativeCrash,
        {"NativeCrashError", "Native code crashed during execution"}},
+      {ErrorCode::NativeSegmentationFault,
+       {"CNativeError", "Segmentation fault (core dumped)"}},
       {ErrorCode::ObjectCreationFailed,
        {"FFIError", "Failed to create native object"}},
       {ErrorCode::PropertyCreationFailed,
@@ -380,7 +382,9 @@ const char *errorTemplate(ErrorCode code) {
   return definition ? definition->message : "Internal FFI error";
 }
 
-std::string formatError(ErrorCode code) { return errorTemplate(code); }
+std::string formatError(ErrorCode code) {
+  return errorTemplate(code);
+}
 
 std::string formatError(ErrorCode code, const std::string &value) {
   return formatString(errorTemplate(code), value);
@@ -390,7 +394,8 @@ std::string formatError(ErrorCode code, std::size_t value) {
   return formatSize(errorTemplate(code), value);
 }
 
-std::string formatError(ErrorCode code, std::size_t first, std::size_t second) {
+std::string formatError(ErrorCode code, std::size_t first,
+                        std::size_t second) {
   return formatSizes(errorTemplate(code), first, second);
 }
 
@@ -399,7 +404,8 @@ std::string formatError(ErrorCode code, const std::string &value,
   return formatStringAndSize(errorTemplate(code), value, index);
 }
 
-std::string formatError(ErrorCode code, const std::string &value, int number) {
+std::string formatError(ErrorCode code, const std::string &value,
+                        int number) {
   return formatStringAndInt(errorTemplate(code), value, number);
 }
 
@@ -412,12 +418,13 @@ JSObjectRef makeError(JSContextRef context, ErrorCode code,
   return makeBasicError(context, errorType(code), formatError(code, value));
 }
 
-JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t value) {
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      std::size_t value) {
   return makeBasicError(context, errorType(code), formatError(code, value));
 }
 
-JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t first,
-                      std::size_t second) {
+JSObjectRef makeError(JSContextRef context, ErrorCode code,
+                      std::size_t first, std::size_t second) {
   return makeBasicError(context, errorType(code),
                         formatError(code, first, second));
 }
