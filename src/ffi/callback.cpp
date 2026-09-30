@@ -1,7 +1,7 @@
-#include "ffi_callback.hpp"
-#include "ffi_call.hpp"
-#include "ffi_errors.hpp"
-#include "ffi_memory.hpp"
+#include "callback.hpp"
+#include "call.hpp"
+#include "errors.hpp"
+#include "memory.hpp"
 
 #include <ffi.h>
 
@@ -40,7 +40,8 @@ JSClassRef getCallbackClass() {
 }
 
 JSValueRef nativeArgumentToJS(JSContextRef context,
-                              const std::shared_ptr<Type> &type, void *value) {
+                              const std::shared_ptr<Type> &type,
+                              void *value) {
   if (!type || !value)
     return nullptr;
 
@@ -49,8 +50,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
     return JSValueMakeUndefined(context);
 
   case TypeKind::Bool:
-    return JSValueMakeBoolean(context,
-                              *static_cast<const uint8_t *>(value) != 0);
+    return JSValueMakeBoolean(
+        context, *static_cast<const uint8_t *>(value) != 0);
 
   case TypeKind::Int8:
     return JSValueMakeNumber(
@@ -120,8 +121,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
     if (!address)
       return JSValueMakeNull(context);
 
-    return makeNativePointer(context,
-                             reinterpret_cast<std::uintptr_t>(address));
+    return makeNativePointer(
+        context, reinterpret_cast<std::uintptr_t>(address));
   }
 
   case TypeKind::CString: {
@@ -151,7 +152,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
 }
 
 bool writeCallbackResult(JSContextRef context,
-                         const std::shared_ptr<Type> &type, JSValueRef value,
+                         const std::shared_ptr<Type> &type,
+                         JSValueRef value,
                          void *result) {
   if (!type || type->kind == TypeKind::Void)
     return true;
@@ -167,14 +169,16 @@ bool writeCallbackResult(JSContextRef context,
   return error == nullptr;
 }
 
-void closureEntry(ffi_cif *cif, void *result, void **arguments,
+void closureEntry(ffi_cif *cif,
+                  void *result,
+                  void **arguments,
                   void *userData) {
   (void)cif;
 
   auto *state = static_cast<CallbackState *>(userData);
 
-  if (!state || !state->alive || state->destroyed || !state->context ||
-      !state->function) {
+  if (!state || !state->alive || state->destroyed ||
+      !state->context || !state->function) {
     return;
   }
 
@@ -203,11 +207,11 @@ void closureEntry(ffi_cif *cif, void *result, void **arguments,
 
       const std::shared_ptr<Type> &type = signature.args[i];
 
-      if (!type || !type->ffi || !type->complete) {
+      if (!type || !type->ffi || !type->complete)
         return;
-      }
 
-      JSValueRef value = nativeArgumentToJS(context, type, arguments[i]);
+      JSValueRef value =
+          nativeArgumentToJS(context, type, arguments[i]);
 
       if (!value)
         return;
@@ -223,22 +227,33 @@ void closureEntry(ffi_cif *cif, void *result, void **arguments,
   JSValueRef callbackError = nullptr;
 
   JSValueRef returnValue = JSObjectCallAsFunction(
-      context, state->function, nullptr, jsArguments.size(),
-      jsArguments.empty() ? nullptr : jsArguments.data(), &callbackError);
+      context,
+      state->function,
+      nullptr,
+      jsArguments.size(),
+      jsArguments.empty() ? nullptr : jsArguments.data(),
+      &callbackError);
 
   if (callbackError || !returnValue)
     return;
 
-  if (!signature.returns || signature.returns->kind == TypeKind::Void) {
+  if (!signature.returns ||
+      signature.returns->kind == TypeKind::Void) {
     return;
   }
 
-  (void)writeCallbackResult(context, signature.returns, returnValue, result);
+  (void)writeCallbackResult(
+      context,
+      signature.returns,
+      returnValue,
+      result);
 }
 
 } // namespace
 
-CallbackState::~CallbackState() { destroy(); }
+CallbackState::~CallbackState() {
+  destroy();
+}
 
 void CallbackState::destroy() {
   if (destroyed)
@@ -261,22 +276,30 @@ void CallbackState::destroy() {
   context = nullptr;
 }
 
-JSObjectRef createCallback(JSContextRef context, JSObjectRef function,
-                           Signature signature, JSValueRef *error) {
+JSObjectRef createCallback(JSContextRef context,
+                           JSObjectRef function,
+                           Signature signature,
+                           JSValueRef *error) {
   if (!function || !JSObjectIsFunction(context, function)) {
     throwError(context, error, ErrorCode::ExpectedFunction);
     return nullptr;
   }
 
   if (!signature.prepared && !prepareSignature(signature)) {
-    throwError(context, error, ErrorCode::SignaturePreparationFailed);
+    throwError(
+        context,
+        error,
+        ErrorCode::SignaturePreparationFailed);
     return nullptr;
   }
 
   JSClassRef classRef = getCallbackClass();
 
   if (!classRef) {
-    throwError(context, error, ErrorCode::FunctionCreationFailed);
+    throwError(
+        context,
+        error,
+        ErrorCode::FunctionCreationFailed);
     return nullptr;
   }
 
@@ -293,7 +316,8 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function,
 
   JSValueProtect(context, state->function);
 
-  state->closure = ffi_closure_alloc(sizeof(ffi_closure), &state->executable);
+  state->closure =
+      ffi_closure_alloc(sizeof(ffi_closure), &state->executable);
 
   if (!state->closure || !state->executable) {
     if (state->closure)
@@ -313,8 +337,11 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function,
   }
 
   const ffi_status status = ffi_prep_closure_loc(
-      static_cast<ffi_closure *>(state->closure), &state->signature.cif,
-      closureEntry, state, state->executable);
+      static_cast<ffi_closure *>(state->closure),
+      &state->signature.cif,
+      closureEntry,
+      state,
+      state->executable);
 
   if (status != FFI_OK) {
     ffi_closure_free(state->closure);
@@ -327,20 +354,27 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function,
 
     delete state;
 
-    throwError(context, error, ErrorCode::FunctionCreationFailed);
+    throwError(
+        context,
+        error,
+        ErrorCode::FunctionCreationFailed);
 
     return nullptr;
   }
 
   state->alive = true;
 
-  JSObjectRef object = JSObjectMake(context, classRef, state);
+  JSObjectRef object =
+      JSObjectMake(context, classRef, state);
 
   if (!object) {
     state->destroy();
     delete state;
 
-    throwError(context, error, ErrorCode::ObjectCreationFailed);
+    throwError(
+        context,
+        error,
+        ErrorCode::ObjectCreationFailed);
 
     return nullptr;
   }
@@ -348,9 +382,11 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function,
   return object;
 }
 
-JSValueRef destroyCallback(JSContextRef context, JSValueRef callback,
+JSValueRef destroyCallback(JSContextRef context,
+                           JSValueRef callback,
                            JSValueRef *error) {
-  CallbackState *state = getCallbackState(context, callback);
+  CallbackState *state =
+      getCallbackState(context, callback);
 
   if (!state) {
     throwError(context, error, ErrorCode::InvalidArgument);
@@ -362,11 +398,13 @@ JSValueRef destroyCallback(JSContextRef context, JSValueRef callback,
   return JSValueMakeUndefined(context);
 }
 
-CallbackState *getCallbackState(JSContextRef context, JSValueRef value) {
+CallbackState *getCallbackState(JSContextRef context,
+                                JSValueRef value) {
   if (!JSValueIsObject(context, value))
     return nullptr;
 
-  JSObjectRef object = JSValueToObject(context, value, nullptr);
+  JSObjectRef object =
+      JSValueToObject(context, value, nullptr);
 
   if (!object)
     return nullptr;
@@ -374,7 +412,8 @@ CallbackState *getCallbackState(JSContextRef context, JSValueRef value) {
   if (!callbackClass)
     return nullptr;
 
-  return static_cast<CallbackState *>(JSObjectGetPrivate(object));
+  return static_cast<CallbackState *>(
+      JSObjectGetPrivate(object));
 }
 
 } // namespace ffi

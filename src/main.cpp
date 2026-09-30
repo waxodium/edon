@@ -4,13 +4,7 @@
 #include "cli.hpp"
 #include "runtime.hpp"
 
-extern "C" {
-    void edon_init_runtime() {}
-}
-
 int main(int argc, char* argv[]) {
-    edon_init_runtime();
-
     std::vector<std::string> args(argv + 1, argv + argc);
     if (args.empty()) {
         printHelp();

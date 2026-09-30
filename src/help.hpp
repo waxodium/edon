@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <vector>
 #include "edon.hpp"
-#include "parser.hpp"
+#include "parsercli.hpp"
 
 namespace color {
     inline constexpr std::string_view RESET          = "\033[0m";
