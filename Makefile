@@ -13,7 +13,6 @@ CXXFLAGS := \
 	-Werror \
 	-O2 \
 	-I$(SRC_DIR) \
-	-I$(FFI_DIR) \
 	-I$(FFI_INCLUDE_DIR) \
 	$(shell pkg-config --cflags javascriptcoregtk-4.1)
 
@@ -24,9 +23,9 @@ LDFLAGS := \
 	-ldl \
 	-lm
 
-SRCS := \
-	$(wildcard $(SRC_DIR)/*.cpp) \
-	$(wildcard $(FFI_DIR)/*.cpp)
+SRC_SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+FFI_SRCS := $(wildcard $(FFI_DIR)/*.cpp)
+SRCS := $(SRC_SRCS) $(FFI_SRCS)
 
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 

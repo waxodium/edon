@@ -15,4 +15,5 @@ const add = math.cfunction("add", {
     args: ["int32", "int32"]
 });
 
-console.log(add(20, 22));
+// add function from `const add` JS
+console.log(add(20, 22)); 
