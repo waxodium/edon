@@ -3,12 +3,11 @@
 #include <ffi.h>
 
 #include <algorithm>
-#include <cctype>
 #include <limits>
 #include <new>
-#include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace edon { namespace ffi {
 
@@ -56,6 +55,7 @@ ffi_type *primitiveFFIType(TypeKind kind) {
 
   case TypeKind::Pointer: return &ffi_type_pointer;
 
+  case TypeKind::Function:
   case TypeKind::Struct:
   case TypeKind::Array: return nullptr;
   }
@@ -68,6 +68,30 @@ bool isPreparing(const Type *type) { return preparing.find(type) != preparing.en
 bool beginPreparing(const Type *type) { return preparing.insert(type).second; }
 
 void endPreparing(const Type *type) { preparing.erase(type); }
+
+bool prepareFunction(Type &type) {
+  if (!type.functionReturn) return false;
+
+  if (!prepareType(type.functionReturn)) return false;
+
+  if (!type.functionReturn->ffi) return false;
+
+  for (const auto &argument : type.functionArgs) {
+    if (!argument) return false;
+
+    if (!prepareType(argument)) return false;
+
+    if (!argument->ffi) return false;
+  }
+
+  /*
+   * A function type is metadata only. libffi represents the
+   * callable value as a pointer, so this Type deliberately
+   * has no ffi_type of its own.
+   */
+  type.complete = true;
+  return true;
+}
 
 bool prepareStruct(Type &type) {
   if (type.fields.empty()) return false;
@@ -125,7 +149,6 @@ bool prepareStruct(Type &type) {
   for (std::size_t i = 0; i < type.fields.size(); ++i) type.fields[i].offset = offsets[i];
 
   type.complete = true;
-
   return true;
 }
 
@@ -188,6 +211,7 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   if (!type) return false;
 
   if (type->complete && type->ffi) return true;
+  if (type->kind == TypeKind::Function && type->complete) { return true; }
 
   if (isPreparing(type.get())) return false;
 
@@ -207,6 +231,8 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
     }
   } else {
     switch (type->kind) {
+    case TypeKind::Function: result = prepareFunction(*type); break;
+
     case TypeKind::Struct: result = prepareStruct(*type); break;
 
     case TypeKind::Array: result = prepareArray(*type); break;
@@ -231,252 +257,8 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   }
 
   endPreparing(type.get());
-
   return result;
 }
-
-std::string removeWhitespace(const std::string &input) {
-  std::string result;
-  result.reserve(input.size());
-
-  for (char character : input) {
-    if (!std::isspace(static_cast<unsigned char>(character))) result += character;
-  }
-
-  return result;
-}
-
-std::shared_ptr<Type> parseBaseType(const std::string &name) {
-  if (name == "void") return makeType(TypeKind::Void);
-
-  if (name == "bool" || name == "_Bool") return makeType(TypeKind::Bool);
-
-  if (name == "char") return makeType(TypeKind::Char);
-
-  if (name == "signedchar") return makeType(TypeKind::Int8);
-
-  if (name == "unsignedchar") return makeType(TypeKind::UInt8);
-
-  if (name == "int8" || name == "int8_t") return makeType(TypeKind::Int8);
-
-  if (name == "uint8" || name == "uint8_t") return makeType(TypeKind::UInt8);
-
-  if (name == "short" || name == "shortint" || name == "signedshort" || name == "signedshortint") {
-    return makeType(TypeKind::Int16);
-  }
-
-  if (name == "unsignedshort" || name == "unsignedshortint") { return makeType(TypeKind::UInt16); }
-
-  if (name == "int" || name == "signed" || name == "signedint") {
-    return makeType(TypeKind::Int32);
-  }
-
-  if (name == "unsigned" || name == "unsignedint") { return makeType(TypeKind::UInt32); }
-
-  if (name == "int16" || name == "int16_t") return makeType(TypeKind::Int16);
-
-  if (name == "uint16" || name == "uint16_t") return makeType(TypeKind::UInt16);
-
-  if (name == "int32" || name == "int32_t") return makeType(TypeKind::Int32);
-
-  if (name == "uint32" || name == "uint32_t") return makeType(TypeKind::UInt32);
-
-  if (name == "longlong" || name == "longlongint" || name == "signedlonglong" ||
-      name == "signedlonglongint") {
-    return makeType(TypeKind::Int64);
-  }
-
-  if (name == "unsignedlonglong" || name == "unsignedlonglongint") {
-    return makeType(TypeKind::UInt64);
-  }
-
-  if (name == "long") return makeType(TypeKind::Int64);
-
-  if (name == "unsignedlong") return makeType(TypeKind::UInt64);
-
-  if (name == "int64" || name == "int64_t") return makeType(TypeKind::Int64);
-
-  if (name == "uint64" || name == "uint64_t") return makeType(TypeKind::UInt64);
-
-  if (name == "size" || name == "size_t") return makeType(TypeKind::Size);
-
-  if (name == "ssize" || name == "ssize_t") return makeType(TypeKind::SSize);
-
-  if (name == "float") return makeType(TypeKind::Float);
-
-  if (name == "double") return makeType(TypeKind::Double);
-
-  return nullptr;
-}
-
-std::shared_ptr<Type> parseStructType(const std::string &name) {
-  constexpr const char *prefix = "struct";
-
-  if (name.rfind(prefix, 0) != 0) return nullptr;
-
-  const std::string structName = name.substr(6);
-
-  if (structName.empty()) return nullptr;
-
-  return makeStruct(structName, {});
-}
-
-struct Qualifiers {
-  bool isConst = false;
-  bool isVolatile = false;
-  bool isRestrict = false;
-};
-
-bool consumeQualifier(const std::string &source, std::size_t &position, const char *qualifier) {
-  const std::size_t length = std::char_traits<char>::length(qualifier);
-
-  if (source.compare(position, length, qualifier) != 0) return false;
-
-  position += length;
-  return true;
-}
-
-Qualifiers parseQualifiers(const std::string &source, std::size_t &position) {
-  Qualifiers qualifiers;
-
-  bool consumed = true;
-
-  while (consumed) {
-    consumed = false;
-
-    if (consumeQualifier(source, position, "const")) {
-      qualifiers.isConst = true;
-      consumed = true;
-      continue;
-    }
-
-    if (consumeQualifier(source, position, "volatile")) {
-      qualifiers.isVolatile = true;
-      consumed = true;
-      continue;
-    }
-
-    if (consumeQualifier(source, position, "restrict")) {
-      qualifiers.isRestrict = true;
-      consumed = true;
-    }
-  }
-
-  return qualifiers;
-}
-
-struct DeclaratorOp {
-  enum class Kind { Pointer, Array };
-
-  Kind kind = Kind::Pointer;
-  std::size_t count = 0;
-
-  bool isConst = false;
-  bool isVolatile = false;
-  bool isRestrict = false;
-};
-
-class DeclaratorParser {
-public:
-  explicit DeclaratorParser(const std::string &source) : source_(source) {}
-
-  bool parse(std::vector<DeclaratorOp> &operations) {
-    position_ = 0;
-
-    if (!parseDeclarator(operations)) return false;
-
-    return position_ == source_.size();
-  }
-
-private:
-  bool parseDeclarator(std::vector<DeclaratorOp> &operations) {
-    std::vector<DeclaratorOp> pointers;
-
-    while (consume('*')) {
-      DeclaratorOp operation;
-      operation.kind = DeclaratorOp::Kind::Pointer;
-
-      const Qualifiers qualifiers = parseQualifiers(source_, position_);
-
-      operation.isConst = qualifiers.isConst;
-      operation.isVolatile = qualifiers.isVolatile;
-      operation.isRestrict = qualifiers.isRestrict;
-
-      pointers.push_back(operation);
-    }
-
-    if (position_ < source_.size() && source_[position_] == '(') {
-      ++position_;
-
-      std::vector<DeclaratorOp> nested;
-
-      if (!parseDeclarator(nested)) return false;
-
-      if (!consume(')')) return false;
-
-      std::vector<DeclaratorOp> suffixes;
-
-      if (!parseArrays(suffixes)) return false;
-
-      operations.insert(operations.end(), suffixes.begin(), suffixes.end());
-
-      operations.insert(operations.end(), nested.begin(), nested.end());
-
-      operations.insert(operations.end(), pointers.begin(), pointers.end());
-
-      return true;
-    }
-
-    if (!parseArrays(operations)) return false;
-
-    operations.insert(operations.begin(), pointers.begin(), pointers.end());
-
-    return true;
-  }
-
-  bool parseArrays(std::vector<DeclaratorOp> &operations) {
-    while (consume('[')) {
-      std::size_t count = 0;
-
-      if (position_ >= source_.size()) return false;
-
-      if (source_[position_] == ']') return false;
-
-      while (position_ < source_.size() && source_[position_] != ']') {
-        const char character = source_[position_];
-
-        if (!std::isdigit(static_cast<unsigned char>(character))) { return false; }
-
-        const std::size_t digit = static_cast<std::size_t>(character - '0');
-
-        if (count > (std::numeric_limits<std::size_t>::max() - digit) / 10) { return false; }
-
-        count = count * 10 + digit;
-        ++position_;
-      }
-
-      if (!consume(']')) return false;
-
-      DeclaratorOp operation;
-      operation.kind = DeclaratorOp::Kind::Array;
-      operation.count = count;
-
-      operations.push_back(operation);
-    }
-
-    return true;
-  }
-
-  bool consume(char character) {
-    if (position_ >= source_.size() || source_[position_] != character) { return false; }
-
-    ++position_;
-    return true;
-  }
-
-  const std::string &source_;
-  std::size_t position_ = 0;
-};
 
 } // namespace
 
@@ -485,13 +267,11 @@ Type::~Type() {
 
   delete[] ffi->elements;
   delete ffi;
-
   ffi = nullptr;
 }
 
 std::shared_ptr<Type> makeType(TypeKind kind) {
   auto type = std::make_shared<Type>();
-
   type->kind = kind;
 
   ffi_type *ffi = primitiveFFIType(kind);
@@ -526,69 +306,12 @@ std::shared_ptr<Type> makeArray(std::shared_ptr<Type> element, std::size_t count
   return type;
 }
 
-std::shared_ptr<Type> parseTypeName(const std::string &input) {
-  std::string source = removeWhitespace(input);
-
-  if (source.empty()) return nullptr;
-
-  std::size_t qualifierPosition = 0;
-
-  const Qualifiers baseQualifiers = parseQualifiers(source, qualifierPosition);
-
-  source.erase(0, qualifierPosition);
-
-  if (source.empty()) return nullptr;
-
-  const std::size_t declaratorStart = source.find_first_of("*([");
-
-  const std::string baseName =
-      declaratorStart == std::string::npos ? source : source.substr(0, declaratorStart);
-
-  const std::string declarator =
-      declaratorStart == std::string::npos ? std::string() : source.substr(declaratorStart);
-
-  std::shared_ptr<Type> type = parseBaseType(baseName);
-
-  if (!type) type = parseStructType(baseName);
-
-  if (!type) return nullptr;
-
-  type->isConst = baseQualifiers.isConst;
-  type->isVolatile = baseQualifiers.isVolatile;
-  type->isRestrict = baseQualifiers.isRestrict;
-
-  if (declarator.empty()) return type;
-
-  std::vector<DeclaratorOp> operations;
-  DeclaratorParser parser(declarator);
-
-  if (!parser.parse(operations)) return nullptr;
-
-  for (const DeclaratorOp &operation : operations) {
-    if (operation.kind == DeclaratorOp::Kind::Pointer) {
-      auto pointer = makeType(TypeKind::Pointer);
-
-      pointer->element = type;
-      pointer->isConst = operation.isConst;
-      pointer->isVolatile = operation.isVolatile;
-      pointer->isRestrict = operation.isRestrict;
-
-      type = std::move(pointer);
-      continue;
-    }
-
-    type = makeArray(type, operation.count);
-  }
-
-  return type;
-}
-
 bool prepareType(const std::shared_ptr<Type> &type) { return prepareTypeInternal(type); }
 
 bool prepareSignature(Signature &signature) {
   if (!signature.returns) return false;
 
-  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) { return false; }
+  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) return false;
 
   if (!prepareType(signature.returns)) return false;
 
@@ -660,6 +383,8 @@ const char *typeName(TypeKind kind) {
   case TypeKind::Double: return "double";
 
   case TypeKind::Pointer: return "pointer";
+
+  case TypeKind::Function: return "function";
 
   case TypeKind::Struct: return "struct";
 

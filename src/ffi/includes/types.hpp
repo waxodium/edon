@@ -27,6 +27,7 @@ enum class TypeKind {
   Float,
   Double,
   Pointer,
+  Function,
   Struct,
   Array
 };
@@ -48,7 +49,6 @@ struct Type {
 
   bool complete = false;
 
-  // Type qualifiers.
   bool isConst = false;
   bool isVolatile = false;
   bool isRestrict = false;
@@ -59,6 +59,9 @@ struct Type {
 
   std::shared_ptr<Type> element;
   std::size_t count = 0;
+
+  std::shared_ptr<Type> functionReturn;
+  std::vector<std::shared_ptr<Type>> functionArgs;
 
   Type() = default;
   ~Type();
@@ -80,7 +83,8 @@ struct Signature {
   bool prepared = false;
 };
 
-std::shared_ptr<Type> makeType(TypeKind kind);
+std::shared_ptr<Type> makeType(
+    TypeKind kind);
 
 std::shared_ptr<Type> makeStruct(
     const std::string &name,
@@ -90,24 +94,35 @@ std::shared_ptr<Type> makeArray(
     std::shared_ptr<Type> element,
     std::size_t count);
 
-std::shared_ptr<Type> parseTypeName(
-    const std::string &input);
-
 bool prepareType(
     const std::shared_ptr<Type> &type);
 
 bool prepareSignature(
     Signature &signature);
 
-const char *typeName(TypeKind kind);
+const char *typeName(
+    TypeKind kind);
 
-bool isPrimitive(TypeKind kind);
-bool isInteger(TypeKind kind);
-bool isSignedInteger(TypeKind kind);
-bool isUnsignedInteger(TypeKind kind);
-bool isFloating(TypeKind kind);
-bool isPointer(TypeKind kind);
-bool isAggregate(TypeKind kind);
+bool isPrimitive(
+    TypeKind kind);
+
+bool isInteger(
+    TypeKind kind);
+
+bool isSignedInteger(
+    TypeKind kind);
+
+bool isUnsignedInteger(
+    TypeKind kind);
+
+bool isFloating(
+    TypeKind kind);
+
+bool isPointer(
+    TypeKind kind);
+
+bool isAggregate(
+    TypeKind kind);
 
 } // namespace ffi
 } // namespace edon

@@ -148,7 +148,7 @@ bool convertNumberToInteger(JSContextRef context, JSValueRef value, T &output, J
 
   double number = 0;
 
-  if (!getNumber(context, value, number, error)) return false;
+  if (!getNumber(context, value, number, error)) { return false; }
 
   if (!isSafeInteger(number)) {
     throwError(context, error, ErrorCode::UnsafeInteger);
@@ -380,6 +380,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
                             JSValueRef *error) {
   if (JSValueIsNull(context, value)) {
     *static_cast<void **>(destination) = nullptr;
+
     return true;
   }
 
@@ -592,6 +593,7 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
 
     return convertPointerArgument(context, value, destination, error);
 
+  case TypeKind::Function:
   case TypeKind::Void:
   case TypeKind::Struct:
   case TypeKind::Array:
@@ -706,6 +708,7 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
       return makeNativePointer(context, reinterpret_cast<std::uintptr_t>(address));
     }
 
+  case TypeKind::Function:
   case TypeKind::Struct:
   case TypeKind::Array:
     throwError(context, error, ErrorCode::UnsupportedReturnType);
@@ -833,7 +836,9 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
     }
 
     std::vector<std::vector<std::max_align_t>> storage;
+
     std::vector<void *> values;
+
     std::vector<std::vector<char>> stringStorage;
 
     storage.reserve(signature.args.size());
@@ -864,6 +869,7 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
       }
 
       storage.emplace_back(words);
+
       values.push_back(storage.back().data());
 
       if (!convertArgument(context, arguments[i], type, values.back(), error, stringStorage)) {
