@@ -11,7 +11,7 @@ struct PackageMeta {
     std::string_view name        = "edon";
     std::string_view version     = "0.0.1";
     std::string_view commit      = EDON_COMMIT_HASH;
-    std::string_view description = "A hybrid JIT/AOT compiler and runtime environment for TypeScript and JS.";
+    std::string_view description = "Hybrid JIT/AOT compiler for TypeScript and JS that linked with C";
     std::string_view homepage    = "https://github.com/waxodium/edon";
     std::string_view license     = "MIT";
 };

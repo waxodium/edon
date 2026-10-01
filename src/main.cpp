@@ -36,7 +36,20 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Command/File Execution: Pass script file to JavaScriptCore
+    if (split.command_name == "run") {
+        if (split.command_args.empty()) {
+            std::cerr << "edon run: missing script file\n";
+            return 1;
+        }
+
+        EdonRuntime runtime;
+        if (!runtime.executeFile(split.command_args[0])) {
+            return 1;
+        }   
+        return 0;
+    }
+
+    // Default and same as run cmd
     if (!split.command_name.empty()) {
         std::string target_file = split.command_name;
 

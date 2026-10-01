@@ -2,7 +2,6 @@
 
 A *distinct* **JavaScript**, **TypeScript** runtime powered by [JavaScriptCore]((https://github.com/WebKit/WebKit/tree/main/Source/JavaScriptCore)), built to cross and push the limits into native code.
 
-
 #### Q1: What does it do?
 Compile C. Load native libraries (`.dll`, `.so`, `.dylib`). Call C functions. Work with memory, pointers, and structs. Interact directly with the native ABI.
 
@@ -10,53 +9,23 @@ Write your application in JavaScript or TypeScript, embed native C where you nee
 
 Compatible with [node.js](https://nodejs.org/) platforms.
 
-( And it is essentially a bridge )
+Edon is a bridge between JavaScript and native C.
 
+#### Q2: What's the difference?
+`edon` is designed around a different idea from Node.js, Bun, Deno, and WebAssembly.
 
-### Code Examples
+Node.js, Bun, and Deno primarily provide JavaScript runtimes with large runtime APIs and huge development enviroment.
 
-#### Allocation: 
-```js
-const { c, allocateSharedBuffer, addressOf } = require("edon:ffi");
+Edon is a full runtime and compile apps into standalone executables, while providing APIs to interact with C programming language natively. While keeping compatibility with the [node.js](https://nodejs.org/) programs.
 
-const native = c`
-    #include <stdint.h>
+#### Q3: Why should use it?
+Choose edon for direct JavaScript integration with C code, native libraries, OS APIs, native memory, and platform capabilities. A lower-level alternative to web-focused development.
 
-    void transform(uint8_t *data, int size) {
-        for (int i = 0; i < size; i++)
-            data[i] ^= 0xFF;
-    }
-`;
-const transform = native.cfunction("transform", {
-    returns: "void",
-    args: ["pointer", "int"]
-});
-
-const buffer = allocateSharedBuffer(16);
-const bytes = new Uint8Array(buffer);
-bytes.fill(42);
-transform(addressOf(buffer), bytes.length);
-
-console.log(bytes[0], bytes[15]);
-```
-
-#### Library Calls:
-```js
-const { loadLibrary } = require("edon:ffi");
-
-const libc = loadLibrary("libc.so.6");
-
-const puts = libc.cfunction("puts", {
-    returns: "int32",
-    args: ["cstring"]
-});
-
-puts("hello from libc");
-```
-
+#### Q4: How to use it?
+Take some look at [examples](./examples) folder and read edon documentation through
+[docs](./docs) directory.
 
 ## Install
-
 Development packages:
 - JavaScriptCoreGTK 4.1
 - libffi
@@ -71,7 +40,6 @@ make
 ```
 
 ## License
-MIT license, check the license file at root source code for more details:
+Edon is MIT licensed, check the license file at root source code for more details:
 [LICENSE](./LICENSE)
-
 
