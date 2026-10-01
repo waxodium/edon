@@ -1,0 +1,26 @@
+---
+BasedOnStyle: LLVM
+
+ColumnLimit: 100
+
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+AllowShortLambdasOnASingleLine: All
+
+BinPackArguments: true
+BinPackParameters: true
+
+BreakBeforeBraces: Attach
+
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+PackConstructorInitializers: CurrentLine
+
+CompactNamespaces: true
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+...
+

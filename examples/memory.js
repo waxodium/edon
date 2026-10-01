@@ -12,12 +12,12 @@ int read_int(int *ptr) {
 
 const writeInt = native.cfunction("write_int", {
     returns: "void",
-    args: ["pointer", "int32"]
+    args: ["int*", "int"]
 });
 
 const readInt = native.cfunction("read_int", {
-    returns: "int32",
-    args: ["pointer"]
+    returns: "int",
+    args: ["int*"]
 });
 
 const buffer = allocateSharedBuffer(4);

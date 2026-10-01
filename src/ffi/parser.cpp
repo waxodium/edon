@@ -2,42 +2,34 @@
 #include "errors.hpp"
 
 #include <cctype>
-#include <sstream>
 #include <memory>
+#include <sstream>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 namespace {
 
 std::string trim(const std::string &value) {
   std::size_t first = 0;
 
-  while (first < value.size() &&
-         std::isspace(static_cast<unsigned char>(value[first]))) {
+  while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) {
     ++first;
   }
 
   std::size_t last = value.size();
 
-  while (last > first &&
-         std::isspace(static_cast<unsigned char>(value[last - 1]))) {
-    --last;
-  }
+  while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) 
+      --last;
 
   return value.substr(first, last - first);
 }
 
-bool splitFunction(const std::string &source,
-                   std::string &returnType,
-                   std::string &name,
+bool splitFunction(const std::string &source, std::string &returnType, std::string &name,
                    std::string &arguments) {
   const std::size_t open = source.find('(');
   const std::size_t close = source.rfind(')');
 
-  if (open == std::string::npos ||
-      close == std::string::npos ||
-      close < open ||
+  if (open == std::string::npos || close == std::string::npos || close < open ||
       !trim(source.substr(close + 1)).empty()) {
     return false;
   }
@@ -45,8 +37,7 @@ bool splitFunction(const std::string &source,
   const std::string prefix = trim(source.substr(0, open));
   const std::size_t separator = prefix.find_last_of(" \t");
 
-  if (separator == std::string::npos)
-    return false;
+  if (separator == std::string::npos) return false;
 
   returnType = trim(prefix.substr(0, separator));
   name = trim(prefix.substr(separator + 1));
@@ -57,9 +48,7 @@ bool splitFunction(const std::string &source,
 
 } // namespace
 
-bool parseType(const std::string &source,
-               std::shared_ptr<Type> &type,
-               std::string &error) {
+bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::string &error) {
   const std::string value = trim(source);
   type = parseTypeName(value);
 
@@ -71,8 +60,7 @@ bool parseType(const std::string &source,
   return true;
 }
 
-bool parseFunctionDeclaration(const std::string &source,
-                              ParsedFunction &function,
+bool parseFunctionDeclaration(const std::string &source, ParsedFunction &function,
                               std::string &error) {
   function = {};
 
@@ -87,19 +75,14 @@ bool parseFunctionDeclaration(const std::string &source,
   std::string name;
   std::string argumentList;
 
-  if (!splitFunction(
-          declaration,
-          returnType,
-          name,
-          argumentList)) {
+  if (!splitFunction(declaration, returnType, name, argumentList)) {
     error = formatError(ErrorCode::InvalidSignature);
     return false;
   }
 
   std::shared_ptr<Type> resultType;
 
-  if (!parseType(returnType, resultType, error))
-    return false;
+  if (!parseType(returnType, resultType, error)) return false;
 
   Signature signature;
   signature.returns = resultType;
@@ -112,27 +95,21 @@ bool parseFunctionDeclaration(const std::string &source,
       argument = trim(argument);
 
       if (argument.empty()) {
-        error = formatError(
-            ErrorCode::MissingArgumentType,
-            signature.args.size());
+        error = formatError(ErrorCode::MissingArgumentType, signature.args.size());
         return false;
       }
 
-      const std::size_t separator =
-          argument.find_last_of(" \t");
+      const std::size_t separator = argument.find_last_of(" \t");
 
       if (separator != std::string::npos) {
-        const std::string candidate =
-            trim(argument.substr(0, separator));
+        const std::string candidate = trim(argument.substr(0, separator));
 
-        if (!candidate.empty() && parseTypeName(candidate))
-          argument = candidate;
+        if (!candidate.empty() && parseTypeName(candidate)) argument = candidate;
       }
 
       std::shared_ptr<Type> argumentType;
 
-      if (!parseType(argument, argumentType, error))
-        return false;
+      if (!parseType(argument, argumentType, error)) return false;
 
       signature.args.push_back(std::move(argumentType));
     }
@@ -149,9 +126,7 @@ bool parseFunctionDeclaration(const std::string &source,
   return true;
 }
 
-bool parseCSource(const std::string &source,
-                  ParsedCSource &result,
-                  std::string &error) {
+bool parseCSource(const std::string &source, ParsedCSource &result, std::string &error) {
   result = {};
 
   const std::string input = trim(source);
@@ -167,16 +142,13 @@ bool parseCSource(const std::string &source,
   while (std::getline(stream, declaration, ';')) {
     declaration = trim(declaration);
 
-    if (declaration.empty())
-      continue;
+    if (declaration.empty()) continue;
 
-    if (declaration.find('(') == std::string::npos)
-      continue;
+    if (declaration.find('(') == std::string::npos) continue;
 
     ParsedFunction function;
 
-    if (!parseFunctionDeclaration(declaration, function, error))
-      return false;
+    if (!parseFunctionDeclaration(declaration, function, error)) return false;
 
     result.functions.push_back(std::move(function));
   }
@@ -184,5 +156,4 @@ bool parseCSource(const std::string &source,
   return true;
 }
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

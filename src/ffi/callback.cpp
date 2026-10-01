@@ -53,6 +53,11 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
     return JSValueMakeBoolean(
         context, *static_cast<const uint8_t *>(value) != 0);
 
+  case TypeKind::Char:
+    return JSValueMakeNumber(
+        context,
+        static_cast<double>(*static_cast<const char *>(value)));
+
   case TypeKind::Int8:
     return JSValueMakeNumber(
         context, static_cast<double>(*static_cast<const int8_t *>(value)));
@@ -94,7 +99,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
     }
 
     return JSValueMakeNumber(
-        context, static_cast<double>(*static_cast<const std::size_t *>(value)));
+        context,
+        static_cast<double>(*static_cast<const std::size_t *>(value)));
 
   case TypeKind::SSize:
     if (sizeof(std::ptrdiff_t) == sizeof(int64_t)) {
@@ -121,26 +127,27 @@ JSValueRef nativeArgumentToJS(JSContextRef context,
     if (!address)
       return JSValueMakeNull(context);
 
+    if (type->element &&
+        type->element->kind == TypeKind::Char) {
+      const char *string =
+          static_cast<const char *>(address);
+
+      JSStringRef jsString =
+          JSStringCreateWithUTF8CString(string);
+
+      if (!jsString)
+        return nullptr;
+
+      JSValueRef result =
+          JSValueMakeString(context, jsString);
+
+      JSStringRelease(jsString);
+
+      return result;
+    }
+
     return makeNativePointer(
         context, reinterpret_cast<std::uintptr_t>(address));
-  }
-
-  case TypeKind::CString: {
-    const char *string = *static_cast<const char *const *>(value);
-
-    if (!string)
-      return JSValueMakeNull(context);
-
-    JSStringRef jsString = JSStringCreateWithUTF8CString(string);
-
-    if (!jsString)
-      return nullptr;
-
-    JSValueRef result = JSValueMakeString(context, jsString);
-
-    JSStringRelease(jsString);
-
-    return result;
   }
 
   case TypeKind::Struct:
@@ -192,7 +199,8 @@ void closureEntry(ffi_cif *cif,
 
   if (!signature.prepared ||
       signature.args.size() >
-          static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
+          static_cast<std::size_t>(
+              std::numeric_limits<unsigned int>::max())) {
     return;
   }
 

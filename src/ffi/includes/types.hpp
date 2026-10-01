@@ -13,6 +13,7 @@ namespace ffi {
 enum class TypeKind {
   Void,
   Bool,
+  Char,
   Int8,
   UInt8,
   Int16,
@@ -26,7 +27,6 @@ enum class TypeKind {
   Float,
   Double,
   Pointer,
-  CString,
   Struct,
   Array
 };
@@ -39,16 +39,19 @@ struct Field {
   std::size_t offset = 0;
 };
 
-
 struct Type {
   TypeKind kind = TypeKind::Void;
-
   std::string name;
 
   std::size_t size = 0;
   std::size_t alignment = 0;
 
   bool complete = false;
+
+  // Type qualifiers.
+  bool isConst = false;
+  bool isVolatile = false;
+  bool isRestrict = false;
 
   ffi_type *ffi = nullptr;
 
