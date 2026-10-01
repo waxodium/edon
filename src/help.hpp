@@ -37,7 +37,8 @@ inline const std::vector<OptionConfig> GLOBAL_OPTIONS = {
 };
 
 inline const std::vector<CommandConfig> REGISTERED_COMMANDS = {
-    {.name = "help", .description = "Show detailed help for a specific command", .usage = "edon help [command]"}
+    {.name = "help", .description = "Show detailed help for a specific command", .usage = "edon help [<command>]"},
+    {.name = "run", .description = "Execute a file with edon", .usage = "edon run ./script.js\n  edon run ./script.ts" }
 };
 
 inline std::string formatFlag(const OptionConfig& opt) {
@@ -54,9 +55,11 @@ inline std::string formatFlag(const OptionConfig& opt) {
     return flag;
 }
 
+
 inline void printHelp(std::string_view target_cmd = "") {
     if (!target_cmd.empty()) {
         const CommandConfig* found = nullptr;
+
         for (const auto& cmd : REGISTERED_COMMANDS) {
             if (cmd.name == target_cmd) {
                 found = &cmd;
@@ -69,37 +72,91 @@ inline void printHelp(std::string_view target_cmd = "") {
             exit(1);
         }
 
-        std::cout << color::UNDERLINE << color::BLUE << "COMMAND:" << color::RESET << "\n  "
-                  << color::YELLOW_BOLD << found->name << color::RESET << " - " << found->description << "\n\n";
-                  
-        std::cout << color::UNDERLINE << color::BLUE << "USAGE:" << color::RESET << "\n  "
-                  << color::RED << "edon" << color::RESET << " " << found->name << " [options]\n\n";
+        std::cout << color::UNDERLINE << color::BLUE << "COMMAND:" << color::RESET
+                  << "\n  "
+                  << color::YELLOW_BOLD << found->name << color::RESET
+                  << " - " << found->description << "\n\n";
+
+        std::cout << color::UNDERLINE << color::BLUE << "USAGE:" << color::RESET
+                  << "\n  "
+                  << found->usage
+                  << "\n\n";
+
+        if (!found->options.empty()) {
+            std::cout << color::UNDERLINE << color::BLUE
+                      << "OPTIONS" << color::RESET << ":\n";
+
+            for (const auto& opt : found->options) {
+                std::cout << "  "
+                          << color::GREEN
+                          << std::left
+                          << std::setw(24)
+                          << formatFlag(opt)
+                          << color::RESET
+                          << opt.description
+                          << "\n";
+            }
+
+            std::cout << "\n";
+        }
+
         return;
     }
 
     std::cout << edon::HEADEDON.description << "\n\n";
+
     std::cout << color::UNDERLINE << color::BLUE << "Usage" << color::RESET << ":\n  "
-              << color::ORANGE << edon::HEADEDON.name << color::RESET << " [globals] <command> [options] [...args]\n\n";
+              << color::ORANGE
+              << edon::HEADEDON.name
+              << color::RESET
+              << " [globals] <command> [options] [...args]\n\n";
 
     if (!GLOBAL_OPTIONS.empty()) {
-        std::cout << color::UNDERLINE << color::BLUE << "GLOBAL OPTIONS" << color::RESET << ":\n";
+        std::cout << color::UNDERLINE << color::BLUE
+                  << "GLOBAL OPTIONS" << color::RESET << ":\n";
+
         for (const auto& opt : GLOBAL_OPTIONS) {
-            std::cout << "  " << color::GREEN << std::left << std::setw(24) << formatFlag(opt)
-                      << color::RESET << opt.description << "\n";
+            std::cout << "  "
+                      << color::GREEN
+                      << std::left
+                      << std::setw(24)
+                      << formatFlag(opt)
+                      << color::RESET
+                      << opt.description
+                      << "\n";
         }
+
         std::cout << "\n";
     }
 
     if (!REGISTERED_COMMANDS.empty()) {
-        std::cout << color::UNDERLINE << color::BLUE << "Commands" << color::RESET << ":\n";
+        std::cout << color::UNDERLINE << color::BLUE
+                  << "Commands" << color::RESET << ":\n";
+
         for (const auto& cmd : REGISTERED_COMMANDS) {
-            std::cout << "  " << color::AQUA_BOLD << std::left << std::setw(24) << cmd.name
-                      << color::RESET << cmd.description << "\n";
+            std::cout << "  "
+                      << color::AQUA_BOLD
+                      << std::left
+                      << std::setw(24)
+                      << cmd.name
+                      << color::RESET
+                      << cmd.description
+                      << "\n";
         }
+
         std::cout << "\n";
     }
 
-    std::cout << color::GRAY << edon::HEADEDON.name << " " << edon::HEADEDON.version << " (" << edon::HEADEDON.commit << ")\n" << color::RESET;
-    std::cout << "Home Page: <" << color::UNDERLINE << color::AQUA << edon::HEADEDON.homepage << color::RESET << ">\n";
-}
+    std::cout << color::GRAY
+              << edon::HEADEDON.name << " "
+              << edon::HEADEDON.version
+              << " (" << edon::HEADEDON.commit << ")\n"
+              << color::RESET;
 
+    std::cout << "Home Page: <"
+              << color::UNDERLINE
+              << color::AQUA
+              << edon::HEADEDON.homepage
+              << color::RESET
+              << ">\n";
+}
