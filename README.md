@@ -1,4 +1,4 @@
-# Edon
+# Edon.js
 
 A *distinct* **JavaScript**, **TypeScript** runtime powered by [JavaScriptCore]((https://github.com/WebKit/WebKit/tree/main/Source/JavaScriptCore)), built to cross and push the limits into native code.
 

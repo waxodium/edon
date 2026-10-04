@@ -2,6 +2,7 @@
 #include "callback.hpp"
 #include "errors.hpp"
 #include "memory.hpp"
+#include "module.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
@@ -376,11 +377,46 @@ bool convertNumberToFloating(JSContextRef context, JSValueRef value, T &output, 
   return true;
 }
 
+bool convertFunctionPointerArgument(JSContextRef context, JSValueRef value, void *destination,
+                                    JSValueRef *error) {
+  if (JSValueIsNull(context, value)) {
+    *static_cast<void **>(destination) = nullptr;
+    return true;
+  }
+
+  if (!JSValueIsObject(context, value)) {
+    throwError(context, error, ErrorCode::ExpectedPointer);
+    return false;
+  }
+
+  if (CallbackState *callback = getCallbackState(context, value)) {
+    if (!callback->alive || callback->destroyed || !callback->executable) {
+      throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
+      return false;
+    }
+
+    *static_cast<void **>(destination) = callback->executable;
+    return true;
+  }
+
+  if (NativeFunctionState *function = getNativeFunctionState(context, value)) {
+    if (!function->address) {
+      throwError(context, error, ErrorCode::InvalidNativeFunction);
+      return false;
+    }
+
+    *static_cast<void **>(destination) = function->address;
+    return true;
+  }
+
+  throwError(context, error, ErrorCode::ExpectedFunction);
+  return false;
+}
+
 bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destination,
                             JSValueRef *error) {
   if (JSValueIsNull(context, value)) {
     *static_cast<void **>(destination) = nullptr;
-
     return true;
   }
 
@@ -388,12 +424,20 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
     if (CallbackState *callback = getCallbackState(context, value)) {
       if (!callback->alive || callback->destroyed || !callback->executable) {
         throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
-
         return false;
       }
 
       *static_cast<void **>(destination) = callback->executable;
+      return true;
+    }
 
+    if (NativeFunctionState *function = getNativeFunctionState(context, value)) {
+      if (!function->address) {
+        throwError(context, error, ErrorCode::InvalidNativeFunction);
+        return false;
+      }
+
+      *static_cast<void **>(destination) = function->address;
       return true;
     }
 
@@ -404,7 +448,6 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
 
       if (address == 0) {
         throwError(context, error, ErrorCode::NullPointer);
-
         return false;
       }
 
@@ -419,18 +462,15 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
     if (getBufferPointer(context, value, data, size, nullptr)) {
       if (!data) {
         throwError(context, error, ErrorCode::InvalidPointer);
-
         return false;
       }
 
       *static_cast<void **>(destination) = data;
-
       return true;
     }
   }
 
   throwError(context, error, ErrorCode::ExpectedPointer);
-
   return false;
 }
 
@@ -591,6 +631,10 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
       return convertCharPointerArgument(context, value, destination, stringStorage, error);
     }
 
+    if (type->element && type->element->kind == TypeKind::Function) {
+      return convertFunctionPointerArgument(context, value, destination, error);
+    }
+
     return convertPointerArgument(context, value, destination, error);
 
   case TypeKind::Function:
@@ -631,7 +675,6 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
                          JSValueRef *error) {
   if (!type) {
     throwError(context, error, ErrorCode::InvalidSignature);
-
     return JSValueMakeUndefined(context);
   }
 
@@ -639,7 +682,6 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
 
   if (!value) {
     throwError(context, error, ErrorCode::InvalidValue);
-
     return JSValueMakeUndefined(context);
   }
 
@@ -697,29 +739,45 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
 
   case TypeKind::Double: return JSValueMakeNumber(context, *static_cast<const double *>(value));
 
-  case TypeKind::Pointer:
+  case TypeKind::Pointer: {
+    void *address = *static_cast<void *const *>(value);
+
+    if (!address) return JSValueMakeNull(context);
+
     if (isCharPointer(type)) { return convertCharPointerReturn(context, value, error); }
 
-    {
-      void *address = *static_cast<void *const *>(value);
+    if (type->element && type->element->kind == TypeKind::Function) {
+      const std::shared_ptr<Type> &functionType = type->element;
 
-      if (!address) return JSValueMakeNull(context);
+      Signature signature;
+      signature.returns = functionType->functionReturn;
+      signature.args = functionType->functionArgs;
 
-      return makeNativePointer(context, reinterpret_cast<std::uintptr_t>(address));
+      if (!prepareSignature(signature)) {
+        throwError(context, error, ErrorCode::SignaturePreparationFailed);
+
+        return JSValueMakeUndefined(context);
+      }
+
+      JSObjectRef function = makeNativeFunction(context, address, std::move(signature), error);
+
+      if (!function) return JSValueMakeUndefined(context);
+
+      return function;
     }
 
+    return makeNativePointer(context, reinterpret_cast<std::uintptr_t>(address));
+  }
   case TypeKind::Function:
   case TypeKind::Struct:
   case TypeKind::Array:
     throwError(context, error, ErrorCode::UnsupportedReturnType);
-
     return JSValueMakeUndefined(context);
 
   case TypeKind::Void: return JSValueMakeUndefined(context);
   }
 
   throwError(context, error, ErrorCode::InvalidValue);
-
   return JSValueMakeUndefined(context);
 }
 

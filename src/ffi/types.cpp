@@ -70,6 +70,8 @@ bool beginPreparing(const Type *type) { return preparing.insert(type).second; }
 void endPreparing(const Type *type) { preparing.erase(type); }
 
 bool prepareFunction(Type &type) {
+  if (type.ffi) return false;
+
   if (!type.functionReturn) return false;
 
   if (!prepareType(type.functionReturn)) return false;
@@ -84,14 +86,10 @@ bool prepareFunction(Type &type) {
     if (!argument->ffi) return false;
   }
 
-  /*
-   * A function type is metadata only. libffi represents the
-   * callable value as a pointer, so this Type deliberately
-   * has no ffi_type of its own.
-   */
   type.complete = true;
   return true;
 }
+
 
 bool prepareStruct(Type &type) {
   if (type.fields.empty()) return false;
