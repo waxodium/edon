@@ -6,8 +6,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 struct Allocation {
   explicit Allocation(std::size_t bytes);
@@ -38,50 +37,27 @@ struct PointerState {
   void invalidate();
 };
 
-JSObjectRef makeNativePointer(
-    JSContextRef context,
-    std::uintptr_t address,
-    std::shared_ptr<Allocation> allocation = nullptr,
-    JSValueRef rootedValue = nullptr);
+JSObjectRef makeNativePointer(JSContextRef context, std::uintptr_t address,
+                              std::shared_ptr<Allocation> allocation = nullptr,
+                              JSValueRef rootedValue = nullptr);
 
-PointerState *getNativePointer(
-    JSContextRef context,
-    JSValueRef value);
+PointerState *getNativePointer(JSContextRef context, JSValueRef value);
 
-JSObjectRef makeExternalArrayBuffer(
-    JSContextRef context,
-    std::shared_ptr<Allocation> allocation);
+JSObjectRef makeExternalArrayBuffer(JSContextRef context, std::shared_ptr<Allocation> allocation);
 
-bool getBufferPointer(
-    JSContextRef context,
-    JSValueRef value,
-    void *&data,
-    std::size_t &size,
-    JSValueRef *error);
+bool getBufferPointer(JSContextRef context, JSValueRef value, void *&data, std::size_t &size,
+                      JSValueRef *error);
 
-bool getPointerValue(
-    JSContextRef context,
-    JSValueRef value,
-    std::uintptr_t &address,
-    JSValueRef *error);
+bool getPointerValue(JSContextRef context, JSValueRef value, std::uintptr_t &address,
+                     JSValueRef *error);
 
-JSValueRef allocateSharedBuffer(
-    JSContextRef context,
-    std::size_t argumentCount,
-    const JSValueRef arguments[],
-    JSValueRef *error);
+JSValueRef allocateSharedBuffer(JSContextRef context, std::size_t argumentCount,
+                                const JSValueRef arguments[], JSValueRef *error);
 
-JSValueRef addressOf(
-    JSContextRef context,
-    std::size_t argumentCount,
-    const JSValueRef arguments[],
-    JSValueRef *error);
+JSValueRef addressOf(JSContextRef context, std::size_t argumentCount, const JSValueRef arguments[],
+                     JSValueRef *error);
 
-JSValueRef freeNativeMemory(
-    JSContextRef context,
-    std::size_t argumentCount,
-    const JSValueRef arguments[],
-    JSValueRef *error);
+JSValueRef freeNativeMemory(JSContextRef context, std::size_t argumentCount,
+                            const JSValueRef arguments[], JSValueRef *error);
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

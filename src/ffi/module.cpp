@@ -7,6 +7,7 @@
 #include "memory.hpp"
 #include "parser.hpp"
 #include "types.hpp"
+#include "signature.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 

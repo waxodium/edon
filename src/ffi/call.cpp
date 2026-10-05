@@ -3,6 +3,7 @@
 #include "errors.hpp"
 #include "memory.hpp"
 #include "module.hpp"
+#include "signature.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
@@ -749,10 +750,15 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
     if (type->element && type->element->kind == TypeKind::Function) {
       const std::shared_ptr<Type> &functionType = type->element;
 
-      Signature signature;
-      signature.returns = functionType->functionReturn;
-      signature.args = functionType->functionArgs;
+      if (!functionType->functionSignature) {
+        throwError(context, error, ErrorCode::InvalidSignature);
+        return JSValueMakeUndefined(context);
+      }
 
+      Signature signature;
+
+      signature.returns = functionType->functionSignature->returns;
+      signature.args = functionType->functionSignature->args;
       if (!prepareSignature(signature)) {
         throwError(context, error, ErrorCode::SignaturePreparationFailed);
 

@@ -1,14 +1,13 @@
 #pragma once
 
-#include "types.hpp"
+#include "signature.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
 #include <cstddef>
 #include <memory>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 struct CallbackState {
   JSContextRef context = nullptr;
@@ -27,20 +26,11 @@ struct CallbackState {
   void destroy();
 };
 
-JSObjectRef createCallback(
-    JSContextRef context,
-    JSObjectRef function,
-    Signature signature,
-    JSValueRef *error);
+JSObjectRef createCallback(JSContextRef context, JSObjectRef function, Signature signature,
+                           JSValueRef *error);
 
-JSValueRef destroyCallback(
-    JSContextRef context,
-    JSValueRef callback,
-    JSValueRef *error);
+JSValueRef destroyCallback(JSContextRef context, JSValueRef callback, JSValueRef *error);
 
-CallbackState *getCallbackState(
-    JSContextRef context,
-    JSValueRef value);
+CallbackState *getCallbackState(JSContextRef context, JSValueRef value);
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

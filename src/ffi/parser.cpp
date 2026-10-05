@@ -1,4 +1,5 @@
 #include "parser.hpp"
+#include "signature.hpp"
 
 #include <cctype>
 #include <limits>
@@ -103,7 +104,7 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
 
   if (name == "char") return makeType(TypeKind::Char);
 
-  if (name == "signedchar") return makeType(TypeKind::Char);
+  if (name == "signedchar") { return makeType(TypeKind::Char); }
 
   if (name == "unsignedchar") { return makeType(TypeKind::UInt8); }
 
@@ -272,6 +273,7 @@ bool splitFunction(const std::string &source, std::string &returnType, std::stri
   if (separator == std::string::npos) return false;
 
   returnType = trim(prefix.substr(0, separator));
+
   name = trim(prefix.substr(separator + 1));
 
   return !returnType.empty() && !name.empty();
@@ -468,8 +470,12 @@ std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
     if (operation.kind == DeclaratorOp::Kind::Function) {
       auto function = makeType(TypeKind::Function);
 
-      function->functionReturn = std::move(type);
-      function->functionArgs = operation.arguments;
+      auto signature = std::make_shared<Signature>();
+
+      signature->returns = std::move(type);
+      signature->args = operation.arguments;
+
+      function->functionSignature = std::move(signature);
 
       type = std::move(function);
     }
@@ -518,7 +524,9 @@ std::shared_ptr<Type> parseTypeName(const std::string &input) {
   if (!type) { return nullptr; }
 
   type->isConst = baseQualifiers.isConst;
+
   type->isVolatile = baseQualifiers.isVolatile;
+
   type->isRestrict = baseQualifiers.isRestrict;
 
   if (declaratorSource.empty()) { return type; }
@@ -671,6 +679,7 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
   for (std::size_t i = 0; i <= source.size(); ++i) {
     const bool end = i == source.size();
+
     const char character = end ? ';' : source[i];
 
     if (!end) {

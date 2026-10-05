@@ -3,6 +3,7 @@
 #include "errors.hpp"
 #include "memory.hpp"
 #include "module.hpp"
+#include "signature.hpp"
 
 #include <ffi.h>
 
@@ -106,10 +107,12 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
     if (type->element && type->element->kind == TypeKind::Function) {
       const std::shared_ptr<Type> &functionType = type->element;
 
-      Signature signature;
-      signature.returns = functionType->functionReturn;
-      signature.args = functionType->functionArgs;
+      if (!functionType->functionSignature) { return nullptr; }
 
+      Signature signature;
+
+      signature.returns = functionType->functionSignature->returns;
+      signature.args = functionType->functionSignature->args;
       if (!prepareSignature(signature)) { return nullptr; }
 
       JSObjectRef function = makeNativeFunction(context, address, std::move(signature), nullptr);

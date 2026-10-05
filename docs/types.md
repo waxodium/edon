@@ -1,6 +1,6 @@
-## C Type Declarations
+# C Type Declarations
 
-### Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
 - [Primitive Types](#primitive-types)
@@ -10,6 +10,8 @@
 - [Function Pointers](#function-pointers)
 - [Using Types](#using-types)
 - [Example Usage](#example-usage)
+
+---
 
 ## Overview
 
@@ -23,6 +25,8 @@ const add = native.cfunction("add", {
   args: ["int32", "int32"]
 });
 ```
+
+Type declarations follow C declarator syntax, including pointers, arrays, qualifiers, and function pointers.
 
 ---
 
@@ -83,6 +87,14 @@ volatile int32*
 
 Pointers are commonly used when native functions operate on memory or strings.
 
+Pointer declarators can also be combined with other C declarators.
+
+```text
+int32**
+char**
+int32*[4]
+```
+
 ---
 
 ## Arrays
@@ -96,6 +108,8 @@ uint8[256]
 ```
 
 The element type and array size are part of the native type declaration.
+
+Arrays can be combined with pointers and other declarators where supported by the C declarator syntax.
 
 ---
 
@@ -120,11 +134,27 @@ restrict int32*
 
 Qualifiers are preserved as part of the parsed type declaration.
 
+Pointer qualifiers can also be specified directly on the pointer declarator:
+
+```text
+int32 *const
+int32 *volatile
+int32 *restrict
+```
+
 ---
 
 ## Function Pointers
 
 Function pointers use standard C declarator syntax.
+
+A function pointer consists of:
+
+1. A return type
+2. A parenthesized `*` declarator
+3. A parameter list
+
+Examples:
 
 ```text
 int (*)(int)
@@ -132,16 +162,71 @@ int (*)(int, double)
 void (*)(const char*)
 ```
 
+These describe pointers to functions with the following signatures:
+
+```text
+int(int)
+int(int, double)
+void(const char*)
+```
+
+The parentheses around `*` are significant.
+
 For example:
+
+```text
+int (*)(int)
+```
+
+is a pointer to a function returning `int32`, while:
+
+```text
+int*(int)
+```
+
+describes a different declarator: a function returning a pointer.
+
+### Named Function Pointers
+
+Function pointers can also appear as named C declarations:
+
+```text
+int (*callback)(int)
+```
+
+This declares `callback` as a pointer to a function returning `int32` and accepting one `int32` argument.
+
+Multiple parameters are supported:
+
+```text
+int (*callback)(int, double)
+```
+
+A function with no parameters can be declared using `void`:
+
+```text
+int (*callback)(void)
+```
+
+This represents a function pointer whose function takes no arguments.
+
+### Function Pointers as Arguments
+
+Function pointers can be supplied as arguments to `cfunction()`.
 
 ```js
 const call = native.cfunction("call_callback", {
   returns: "int32",
-  args: ["int (*)(int)", "int32"]
+  args: [
+    "int (*)(int)",
+    "int32"
+  ]
 });
 ```
 
-A compatible callback can then be created with [`createCallback()`](./callbacks.md).
+The first argument is a pointer to a function taking an `int32` and returning an `int32`.
+
+A compatible callback can then be passed to the native function:
 
 ```js
 const callback = createCallback(
@@ -151,7 +236,63 @@ const callback = createCallback(
     args: ["int32"]
   }
 );
+
+console.log(call(callback, 41));
 ```
+
+The callback's signature must match the function-pointer type expected by the native function.
+
+### Function Pointers as Return Values
+
+Function pointers can also be used as return types.
+
+For example:
+
+```text
+int (*)(int)
+```
+
+can describe a native function that returns a pointer to a function taking an `int32` and returning an `int32`.
+
+A native declaration might look like:
+
+```c
+int (*get_callback(void))(int);
+```
+
+The corresponding `cfunction()` declaration is:
+
+```js
+const getCallback = native.cfunction("get_callback", {
+  returns: "int (*)(int)",
+  args: []
+});
+```
+
+The returned value represents a native function pointer and can be invoked using its declared signature.
+
+### Parenthesized Declarators
+
+Function pointers rely on C's parenthesized declarator syntax.
+
+For example:
+
+```text
+int (*)(int)
+```
+
+contains a pointer declarator inside parentheses.
+
+More complex declarations can combine function pointers with additional pointer or array declarators:
+
+```text
+int (**)(int)
+int (*[4])(int)
+```
+
+The parentheses determine how the declarator is grouped and therefore which type is constructed.
+
+`edon:ffi` preserves this declarator structure when parsing function-pointer types.
 
 ---
 
@@ -182,11 +323,25 @@ const callback = createCallback(
 );
 ```
 
+Function-pointer types use the same declaration syntax:
+
+```js
+const call = native.cfunction("call_callback", {
+  returns: "int32",
+  args: [
+    "int (*)(int)",
+    "int32"
+  ]
+});
+```
+
 The declared types determine native ABI layout and JavaScript-to-native value conversion.
 
 ---
 
 ## Example Usage
+
+A native function can accept a function pointer and invoke it:
 
 ```js
 const {
@@ -203,7 +358,10 @@ const native = c(`
 
 const callCallback = native.cfunction("call_callback", {
   returns: "int32",
-  args: ["int (*)(int)", "int32"]
+  args: [
+    "int (*)(int)",
+    "int32"
+  ]
 });
 
 const callback = createCallback(
@@ -219,3 +377,21 @@ console.log(callCallback(callback, 21));
 destroyCallback(callback);
 ```
 
+Output:
+
+```text
+42
+```
+
+The native function expects:
+
+```text
+int (*)(int)
+```
+
+and the JavaScript callback provides the compatible signature:
+
+```text
+returns: "int32"
+args: ["int32"]
+```

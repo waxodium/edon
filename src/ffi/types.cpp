@@ -1,4 +1,5 @@
 #include "types.hpp"
+#include "signature.hpp"
 
 #include <ffi.h>
 
@@ -70,26 +71,15 @@ bool beginPreparing(const Type *type) { return preparing.insert(type).second; }
 void endPreparing(const Type *type) { preparing.erase(type); }
 
 bool prepareFunction(Type &type) {
-  if (type.ffi) return false;
+  if (type.complete) return true;
 
-  if (!type.functionReturn) return false;
+  if (!type.functionSignature) return false;
 
-  if (!prepareType(type.functionReturn)) return false;
-
-  if (!type.functionReturn->ffi) return false;
-
-  for (const auto &argument : type.functionArgs) {
-    if (!argument) return false;
-
-    if (!prepareType(argument)) return false;
-
-    if (!argument->ffi) return false;
-  }
+  if (!prepareSignature(*type.functionSignature)) return false;
 
   type.complete = true;
   return true;
 }
-
 
 bool prepareStruct(Type &type) {
   if (type.fields.empty()) return false;
@@ -144,7 +134,7 @@ bool prepareStruct(Type &type) {
   type.size = aggregate->size;
   type.alignment = aggregate->alignment;
 
-  for (std::size_t i = 0; i < type.fields.size(); ++i) type.fields[i].offset = offsets[i];
+  for (std::size_t i = 0; i < type.fields.size(); ++i) { type.fields[i].offset = offsets[i]; }
 
   type.complete = true;
   return true;
@@ -157,7 +147,7 @@ bool prepareArray(Type &type) {
 
   if (!type.element->ffi) return false;
 
-  if (type.count == std::numeric_limits<std::size_t>::max()) return false;
+  if (type.count == std::numeric_limits<std::size_t>::max()) { return false; }
 
   const std::size_t elementCount = type.count + 1;
 
@@ -167,7 +157,7 @@ bool prepareArray(Type &type) {
     elements.resize(elementCount);
   } catch (...) { return false; }
 
-  for (std::size_t i = 0; i < type.count; ++i) elements[i] = type.element->ffi;
+  for (std::size_t i = 0; i < type.count; ++i) { elements[i] = type.element->ffi; }
 
   elements[type.count] = nullptr;
 
@@ -209,6 +199,7 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   if (!type) return false;
 
   if (type->complete && type->ffi) return true;
+
   if (type->kind == TypeKind::Function && type->complete) { return true; }
 
   if (isPreparing(type.get())) return false;
@@ -309,7 +300,7 @@ bool prepareType(const std::shared_ptr<Type> &type) { return prepareTypeInternal
 bool prepareSignature(Signature &signature) {
   if (!signature.returns) return false;
 
-  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) return false;
+  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) { return false; }
 
   if (!prepareType(signature.returns)) return false;
 

@@ -3,13 +3,9 @@
 #include <memory>
 #include <string>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
-enum class NativeModuleKind {
-  TCC,
-  DynamicLibrary
-};
+enum class NativeModuleKind { TCC, DynamicLibrary };
 
 struct NativeCompileDiagnostic {
   std::string source;
@@ -26,18 +22,13 @@ public:
 
   void *resolve(const std::string &name) const;
 
-  static std::shared_ptr<NativeModuleState> compile(
-      const std::string &source,
-      std::string &error,
-      NativeCompileDiagnostic &diagnostic);
+  static std::shared_ptr<NativeModuleState> compile(const std::string &source, std::string &error,
+                                                    NativeCompileDiagnostic &diagnostic);
 
-  static std::shared_ptr<NativeModuleState> load(
-      const std::string &path,
-      std::string &error);
+  static std::shared_ptr<NativeModuleState> load(const std::string &path, std::string &error);
 
   NativeModuleKind kind;
   void *handle = nullptr;
 };
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi
