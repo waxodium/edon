@@ -6,8 +6,8 @@
 #include "library.hpp"
 #include "memory.hpp"
 #include "parser.hpp"
-#include "types.hpp"
 #include "signature.hpp"
+#include "types.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
@@ -191,6 +191,16 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, 
     }
 
     std::shared_ptr<Type> type;
+
+    if (argName == "...") {
+      if (i + 1 != count) {
+        throwError(context, error, ErrorCode::InvalidArgumentList);
+        return false;
+      }
+
+      parsedSignature.variadic = true;
+      continue;
+    }
 
     if (!parseType(argName, type, parseError) || !type) {
       throwError(context, error, ErrorCode::UnknownArgumentType, argName);

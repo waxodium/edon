@@ -13,6 +13,8 @@ struct Signature {
   std::shared_ptr<Type> returns;
   std::vector<std::shared_ptr<Type>> args;
 
+  bool variadic = false;
+
   ffi_cif cif{};
   std::vector<ffi_type *> ffiArgs;
 

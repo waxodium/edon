@@ -16,7 +16,7 @@ Edon is a bridge between JavaScript and native C.
 
 Node.js, Bun, and Deno primarily provide JavaScript runtimes with large runtime APIs and huge development enviroment.
 
-Edon is a full runtime and compile apps into standalone executables, while providing APIs to interact with C programming language natively. While keeping compatibility with the [node.js](https://nodejs.org/) programs.
+Edon is a full runtime and compile apps into standalone executables, while providing APIs to interact with C programming language natively. And keeping compatibility with the [node.js](https://nodejs.org/) programs.
 
 #### Q3: Why should use it?
 Choose edon for direct JavaScript integration with C code, native libraries, OS APIs, native memory, and platform capabilities. A lower-level alternative to web-focused development.

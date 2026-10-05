@@ -326,9 +326,17 @@ bool prepareSignature(Signature &signature) {
 
   ffi_cif cif{};
 
-  const ffi_status status =
-      ffi_prep_cif(&cif, FFI_DEFAULT_ABI, static_cast<unsigned int>(ffiArgs.size()),
-                   signature.returns->ffi, ffiArgs.empty() ? nullptr : ffiArgs.data());
+  ffi_status status = FFI_BAD_TYPEDEF;
+
+  if (signature.variadic) {
+    const unsigned int fixedCount = static_cast<unsigned int>(ffiArgs.size());
+
+    status = ffi_prep_cif_var(&cif, FFI_DEFAULT_ABI, fixedCount, fixedCount, signature.returns->ffi,
+                              ffiArgs.empty() ? nullptr : ffiArgs.data());
+  } else {
+    status = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, static_cast<unsigned int>(ffiArgs.size()),
+                          signature.returns->ffi, ffiArgs.empty() ? nullptr : ffiArgs.data());
+  }
 
   if (status != FFI_OK) return false;
 

@@ -393,6 +393,7 @@ bool convertFunctionPointerArgument(JSContextRef context, JSValueRef value, void
   if (CallbackState *callback = getCallbackState(context, value)) {
     if (!callback->alive || callback->destroyed || !callback->executable) {
       throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
+
       return false;
     }
 
@@ -403,6 +404,7 @@ bool convertFunctionPointerArgument(JSContextRef context, JSValueRef value, void
   if (NativeFunctionState *function = getNativeFunctionState(context, value)) {
     if (!function->address) {
       throwError(context, error, ErrorCode::InvalidNativeFunction);
+
       return false;
     }
 
@@ -425,6 +427,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
     if (CallbackState *callback = getCallbackState(context, value)) {
       if (!callback->alive || callback->destroyed || !callback->executable) {
         throwError(context, error, ErrorCode::CallbackAlreadyDestroyed);
+
         return false;
       }
 
@@ -435,6 +438,7 @@ bool convertPointerArgument(JSContextRef context, JSValueRef value, void *destin
     if (NativeFunctionState *function = getNativeFunctionState(context, value)) {
       if (!function->address) {
         throwError(context, error, ErrorCode::InvalidNativeFunction);
+
         return false;
       }
 
@@ -479,13 +483,11 @@ bool convertCharPointerArgument(JSContextRef context, JSValueRef value, void *de
                                 std::vector<std::vector<char>> &stringStorage, JSValueRef *error) {
   if (JSValueIsNull(context, value)) {
     *static_cast<const char **>(destination) = nullptr;
-
     return true;
   }
 
   if (!JSValueIsString(context, value)) {
     throwError(context, error, ErrorCode::ExpectedString);
-
     return false;
   }
 
@@ -498,7 +500,6 @@ bool convertCharPointerArgument(JSContextRef context, JSValueRef value, void *de
 
   if (!string) {
     throwError(context, error, ErrorCode::InvalidCString);
-
     return false;
   }
 
@@ -508,7 +509,6 @@ bool convertCharPointerArgument(JSContextRef context, JSValueRef value, void *de
     JSStringRelease(string);
 
     throwError(context, error, ErrorCode::InvalidCString);
-
     return false;
   }
 
@@ -520,7 +520,6 @@ bool convertCharPointerArgument(JSContextRef context, JSValueRef value, void *de
     JSStringRelease(string);
 
     throwError(context, error, ErrorCode::NativeCallFailed);
-
     return false;
   }
 
@@ -530,7 +529,6 @@ bool convertCharPointerArgument(JSContextRef context, JSValueRef value, void *de
 
   if (length == 0) {
     throwError(context, error, ErrorCode::InvalidCString);
-
     return false;
   }
 
@@ -551,7 +549,6 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
                      std::vector<std::vector<char>> &stringStorage) {
   if (!type || !destination) {
     throwError(context, error, ErrorCode::InvalidArgument);
-
     return false;
   }
 
@@ -559,7 +556,6 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
   case TypeKind::Bool:
     if (!JSValueIsBoolean(context, value)) {
       throwError(context, error, ErrorCode::InvalidArgument);
-
       return false;
     }
 
@@ -652,10 +648,89 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
   return false;
 }
 
+std::shared_ptr<Type> inferVariadicType(JSContextRef context, JSValueRef value, JSValueRef *error) {
+  if (!value) {
+    throwError(context, error, ErrorCode::InvalidArgument);
+    return nullptr;
+  }
+
+  if (JSValueIsNumber(context, value)) {
+    double number = 0;
+
+    if (!getNumber(context, value, number, error)) { return nullptr; }
+
+    if (std::isfinite(number) && std::trunc(number) == number && isSafeInteger(number) &&
+        number >= static_cast<double>(std::numeric_limits<int32_t>::min()) &&
+        number <= static_cast<double>(std::numeric_limits<int32_t>::max())) {
+      auto type = makeType(TypeKind::Int32);
+
+      if (!type || !prepareType(type)) {
+        throwError(context, error, ErrorCode::InvalidSignature);
+
+        return nullptr;
+      }
+
+      return type;
+    }
+
+    auto type = makeType(TypeKind::Double);
+
+    if (!type || !prepareType(type)) {
+      throwError(context, error, ErrorCode::InvalidSignature);
+
+      return nullptr;
+    }
+
+    return type;
+  }
+
+  if (JSValueIsBigInt(context, value)) {
+    auto type = makeType(TypeKind::Int64);
+
+    if (!type || !prepareType(type)) {
+      throwError(context, error, ErrorCode::InvalidSignature);
+
+      return nullptr;
+    }
+
+    return type;
+  }
+
+  if (JSValueIsString(context, value)) {
+    auto charType = makeType(TypeKind::Char);
+
+    if (!charType || !prepareType(charType)) {
+      throwError(context, error, ErrorCode::InvalidSignature);
+
+      return nullptr;
+    }
+
+    auto pointerType = makeType(TypeKind::Pointer);
+
+    if (!pointerType) {
+      throwError(context, error, ErrorCode::InvalidSignature);
+
+      return nullptr;
+    }
+
+    pointerType->element = std::move(charType);
+    pointerType->size = sizeof(void *);
+    pointerType->alignment = alignof(void *);
+    pointerType->complete = true;
+    pointerType->ffi = &ffi_type_pointer;
+
+    return pointerType;
+  }
+
+  throwError(context, error, ErrorCode::InvalidArgument);
+
+  return nullptr;
+}
+
 JSValueRef convertCharPointerReturn(JSContextRef context, const void *value, JSValueRef *error) {
   const char *string = *static_cast<const char *const *>(value);
 
-  if (!string) return JSValueMakeNull(context);
+  if (!string) { return JSValueMakeNull(context); }
 
   JSStringRef jsString = JSStringCreateWithUTF8CString(string);
 
@@ -676,13 +751,15 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
                          JSValueRef *error) {
   if (!type) {
     throwError(context, error, ErrorCode::InvalidSignature);
+
     return JSValueMakeUndefined(context);
   }
 
-  if (type->kind == TypeKind::Void) return JSValueMakeUndefined(context);
+  if (type->kind == TypeKind::Void) { return JSValueMakeUndefined(context); }
 
   if (!value) {
     throwError(context, error, ErrorCode::InvalidValue);
+
     return JSValueMakeUndefined(context);
   }
 
@@ -743,7 +820,7 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
   case TypeKind::Pointer: {
     void *address = *static_cast<void *const *>(value);
 
-    if (!address) return JSValueMakeNull(context);
+    if (!address) { return JSValueMakeNull(context); }
 
     if (isCharPointer(type)) { return convertCharPointerReturn(context, value, error); }
 
@@ -752,13 +829,18 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
 
       if (!functionType->functionSignature) {
         throwError(context, error, ErrorCode::InvalidSignature);
+
         return JSValueMakeUndefined(context);
       }
 
       Signature signature;
 
       signature.returns = functionType->functionSignature->returns;
+
       signature.args = functionType->functionSignature->args;
+
+      signature.variadic = functionType->functionSignature->variadic;
+
       if (!prepareSignature(signature)) {
         throwError(context, error, ErrorCode::SignaturePreparationFailed);
 
@@ -767,23 +849,26 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
 
       JSObjectRef function = makeNativeFunction(context, address, std::move(signature), error);
 
-      if (!function) return JSValueMakeUndefined(context);
+      if (!function) { return JSValueMakeUndefined(context); }
 
       return function;
     }
 
     return makeNativePointer(context, reinterpret_cast<std::uintptr_t>(address));
   }
+
   case TypeKind::Function:
   case TypeKind::Struct:
   case TypeKind::Array:
     throwError(context, error, ErrorCode::UnsupportedReturnType);
+
     return JSValueMakeUndefined(context);
 
   case TypeKind::Void: return JSValueMakeUndefined(context);
   }
 
   throwError(context, error, ErrorCode::InvalidValue);
+
   return JSValueMakeUndefined(context);
 }
 
@@ -886,11 +971,20 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
 
     if (!validateSignature(context, signature, error)) { return JSValueMakeUndefined(context); }
 
-    if (argumentCount != signature.args.size()) {
-      throwError(context, error, ErrorCode::ArgumentCountMismatch, signature.args.size(),
-                 argumentCount);
+    if (signature.variadic) {
+      if (argumentCount < signature.args.size()) {
+        throwError(context, error, ErrorCode::ArgumentCountMismatch, signature.args.size(),
+                   argumentCount);
 
-      return JSValueMakeUndefined(context);
+        return JSValueMakeUndefined(context);
+      }
+    } else {
+      if (argumentCount != signature.args.size()) {
+        throwError(context, error, ErrorCode::ArgumentCountMismatch, signature.args.size(),
+                   argumentCount);
+
+        return JSValueMakeUndefined(context);
+      }
     }
 
     if (argumentCount != 0 && !arguments) {
@@ -899,18 +993,33 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
       return JSValueMakeUndefined(context);
     }
 
-    std::vector<std::vector<std::max_align_t>> storage;
-
-    std::vector<void *> values;
-
-    std::vector<std::vector<char>> stringStorage;
-
-    storage.reserve(signature.args.size());
-    values.reserve(signature.args.size());
-    stringStorage.reserve(signature.args.size());
+    std::vector<std::shared_ptr<Type>> argumentTypes;
+    argumentTypes.reserve(argumentCount);
 
     for (std::size_t i = 0; i < signature.args.size(); ++i) {
-      const std::shared_ptr<Type> &type = signature.args[i];
+      argumentTypes.push_back(signature.args[i]);
+    }
+
+    if (signature.variadic) {
+      for (std::size_t i = signature.args.size(); i < argumentCount; ++i) {
+        std::shared_ptr<Type> type = inferVariadicType(context, arguments[i], error);
+
+        if (!type) { return JSValueMakeUndefined(context); }
+
+        argumentTypes.push_back(std::move(type));
+      }
+    }
+
+    std::vector<std::vector<std::max_align_t>> storage;
+    std::vector<void *> values;
+    std::vector<std::vector<char>> stringStorage;
+
+    storage.reserve(argumentCount);
+    values.reserve(argumentCount);
+    stringStorage.reserve(argumentCount);
+
+    for (std::size_t i = 0; i < argumentTypes.size(); ++i) {
+      const std::shared_ptr<Type> &type = argumentTypes[i];
 
       if (!type || !type->ffi || !type->complete) {
         throwError(context, error, ErrorCode::InvalidSignature);
@@ -949,7 +1058,35 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
       return JSValueMakeUndefined(context);
     }
 
+    ffi_cif temporaryCif{};
+
     ffi_cif *cif = const_cast<ffi_cif *>(&signature.cif);
+
+    std::vector<ffi_type *> variadicFFIArgs;
+
+    if (signature.variadic) {
+      variadicFFIArgs.reserve(argumentTypes.size());
+
+      for (const std::shared_ptr<Type> &type : argumentTypes) {
+        variadicFFIArgs.push_back(type->ffi);
+      }
+
+      const unsigned int fixedCount = static_cast<unsigned int>(signature.args.size());
+
+      const unsigned int totalCount = static_cast<unsigned int>(variadicFFIArgs.size());
+
+      const ffi_status status =
+          ffi_prep_cif_var(&temporaryCif, FFI_DEFAULT_ABI, fixedCount, totalCount, returnType->ffi,
+                           variadicFFIArgs.data());
+
+      if (status != FFI_OK) {
+        throwError(context, error, ErrorCode::SignaturePreparationFailed);
+
+        return JSValueMakeUndefined(context);
+      }
+
+      cif = &temporaryCif;
+    }
 
     void **argumentValues = values.empty() ? nullptr : values.data();
 
@@ -970,7 +1107,7 @@ JSValueRef callNativeFunction(JSContextRef context, const NativeFunctionState &f
 
     std::size_t returnSize = returnType->size;
 
-    if (returnSize < sizeof(ffi_arg)) returnSize = sizeof(ffi_arg);
+    if (returnSize < sizeof(ffi_arg)) { returnSize = sizeof(ffi_arg); }
 
     const std::size_t returnWords = storageWords(returnSize);
 

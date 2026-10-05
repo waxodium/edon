@@ -2,6 +2,8 @@
 #include "signature.hpp"
 
 #include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -30,6 +32,7 @@ struct DeclaratorOp {
   bool isRestrict = false;
 
   std::vector<std::shared_ptr<Type>> arguments;
+  bool variadic = false;
 };
 
 struct Declarator {
@@ -419,7 +422,16 @@ private:
           continue;
         }
 
-        for (const std::string &argumentSourceItem : arguments) {
+        for (std::size_t i = 0; i < arguments.size(); ++i) {
+          const std::string argumentSourceItem = trim(arguments[i]);
+
+          if (argumentSourceItem == "...") {
+            if (i + 1 != arguments.size()) { return false; }
+
+            function.variadic = true;
+            continue;
+          }
+
           std::shared_ptr<Type> argument = parseParameterType(argumentSourceItem);
 
           if (!argument) { return false; }
@@ -474,6 +486,7 @@ std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
 
       signature->returns = std::move(type);
       signature->args = operation.arguments;
+      signature->variadic = operation.variadic;
 
       function->functionSignature = std::move(signature);
 
@@ -640,8 +653,18 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
     if (arguments.size() == 1 && trim(arguments[0]) == "void") { arguments.clear(); }
   }
 
-  for (const std::string &argumentSourceItem : arguments) {
-    const std::string candidate = trim(argumentSourceItem);
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string candidate = trim(arguments[i]);
+
+    if (candidate == "...") {
+      if (i + 1 != arguments.size()) {
+        error = "variadic marker must be last";
+        return false;
+      }
+
+      signature.variadic = true;
+      continue;
+    }
 
     if (candidate.empty()) {
       error = "empty function argument";
@@ -657,7 +680,6 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
 
     signature.args.push_back(std::move(argument));
   }
-
   if (!prepareSignature(signature)) {
     error = "failed to prepare function signature";
     return false;
