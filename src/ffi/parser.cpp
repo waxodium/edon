@@ -670,31 +670,65 @@ bool parseFieldDeclaration(const std::string &source, TypeContext *context, Fiel
     return false;
   }
 
-  std::size_t split = input.size();
+  std::size_t nameEnd = input.size();
 
-  while (split > 0 && std::isspace(static_cast<unsigned char>(input[split - 1]))) { --split; }
+  while (nameEnd > 0 && std::isspace(static_cast<unsigned char>(input[nameEnd - 1]))) { --nameEnd; }
 
-  std::size_t nameEnd = split;
+  while (nameEnd > 0 && input[nameEnd - 1] == ']') {
+    int depth = 0;
+    std::size_t position = nameEnd;
 
-  while (split > 0) {
-    const char character = input[split - 1];
+    while (position > 0) {
+      --position;
+
+      if (input[position] == ']') {
+        ++depth;
+      } else if (input[position] == '[') {
+        --depth;
+
+        if (depth == 0) {
+          nameEnd = position;
+          break;
+        }
+      }
+    }
+
+    while (nameEnd > 0 && std::isspace(static_cast<unsigned char>(input[nameEnd - 1]))) {
+      --nameEnd;
+    }
+  }
+
+  const std::size_t suffixStart = nameEnd;
+
+  std::size_t nameStart = nameEnd;
+
+  while (nameStart > 0) {
+    const char character = input[nameStart - 1];
 
     if (std::isalnum(static_cast<unsigned char>(character)) || character == '_') {
-      --split;
+      --nameStart;
       continue;
     }
 
     break;
   }
 
-  if (split == nameEnd) {
+  if (nameStart == nameEnd) {
     error = "struct field requires a name: " + input;
     return false;
   }
 
-  const std::string name = input.substr(split, nameEnd - split);
+  const std::string name = input.substr(nameStart, nameEnd - nameStart);
 
-  std::string typeSource = trim(input.substr(0, split));
+  std::string typeSource = trim(input.substr(0, nameStart));
+
+  const std::string suffix = input.substr(suffixStart);
+
+  if (!suffix.empty()) {
+    if (!typeSource.empty()) typeSource += " ";
+
+    typeSource += suffix;
+  }
 
   std::shared_ptr<Type> type;
 
