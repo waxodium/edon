@@ -880,6 +880,13 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     return false;
   }
 
+  auto structType = context->getOrCreateStruct(name);
+
+  if (!structType) {
+    error = "failed to create struct: " + name;
+    return false;
+  }
+
   std::vector<Field> fields;
 
   try {
@@ -895,13 +902,6 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     if (!parseFieldDeclaration(fieldSource, context, field, error)) { return false; }
 
     fields.push_back(std::move(field));
-  }
-
-  auto structType = context->getOrCreateStruct(name);
-
-  if (!structType) {
-    error = "failed to create struct: " + name;
-    return false;
   }
 
   structType->fields = std::move(fields);
