@@ -2,8 +2,6 @@
 #include "signature.hpp"
 
 #include <cctype>
-#include <cmath>
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -11,6 +9,38 @@
 #include <vector>
 
 namespace edon { namespace ffi {
+
+std::shared_ptr<Type> TypeContext::findStruct(const std::string &name) const {
+  const auto it = structs_.find(name);
+
+  if (it == structs_.end()) return nullptr;
+
+  return it->second;
+}
+
+std::shared_ptr<Type> TypeContext::getOrCreateStruct(const std::string &name) {
+  const auto it = structs_.find(name);
+
+  if (it != structs_.end()) return it->second;
+
+  auto type = makeStruct(name, {});
+
+  if (!type) return nullptr;
+
+  structs_.emplace(name, type);
+
+  return type;
+}
+
+bool TypeContext::defineStruct(const std::string &name, std::vector<Field> fields) {
+  auto type = getOrCreateStruct(name);
+
+  if (!type || type->complete) return false;
+
+  type->fields = std::move(fields);
+
+  return prepareType(type);
+}
 
 namespace {
 
@@ -39,6 +69,8 @@ struct Declarator {
   std::vector<DeclaratorOp> pointers;
   std::vector<DeclaratorOp> suffixes;
   std::shared_ptr<Declarator> nested;
+
+  std::string name;
 };
 
 std::string trim(const std::string &value) {
@@ -57,10 +89,11 @@ std::string trim(const std::string &value) {
 
 std::string removeWhitespace(const std::string &value) {
   std::string result;
+
   result.reserve(value.size());
 
   for (char character : value) {
-    if (!std::isspace(static_cast<unsigned char>(character))) { result.push_back(character); }
+    if (!std::isspace(static_cast<unsigned char>(character))) result.push_back(character);
   }
 
   return result;
@@ -69,9 +102,10 @@ std::string removeWhitespace(const std::string &value) {
 bool consumeQualifier(const std::string &source, std::size_t &position, const char *qualifier) {
   const std::size_t length = std::char_traits<char>::length(qualifier);
 
-  if (source.compare(position, length, qualifier) != 0) { return false; }
+  if (source.compare(position, length, qualifier) != 0) return false;
 
   position += length;
+
   return true;
 }
 
@@ -103,17 +137,17 @@ Qualifiers parseQualifiers(const std::string &source, std::size_t &position) {
 std::shared_ptr<Type> parseBaseType(const std::string &name) {
   if (name == "void") return makeType(TypeKind::Void);
 
-  if (name == "bool" || name == "_Bool") { return makeType(TypeKind::Bool); }
+  if (name == "bool" || name == "_Bool") return makeType(TypeKind::Bool);
 
   if (name == "char") return makeType(TypeKind::Char);
 
-  if (name == "signedchar") { return makeType(TypeKind::Char); }
+  if (name == "signedchar") return makeType(TypeKind::Char);
 
-  if (name == "unsignedchar") { return makeType(TypeKind::UInt8); }
+  if (name == "unsignedchar") return makeType(TypeKind::UInt8);
 
-  if (name == "int8" || name == "int8_t") { return makeType(TypeKind::Int8); }
+  if (name == "int8" || name == "int8_t") return makeType(TypeKind::Int8);
 
-  if (name == "uint8" || name == "uint8_t") { return makeType(TypeKind::UInt8); }
+  if (name == "uint8" || name == "uint8_t") return makeType(TypeKind::UInt8);
 
   if (name == "short" || name == "shortint" || name == "signedshort" || name == "signedshortint") {
     return makeType(TypeKind::Int16);
@@ -127,13 +161,13 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
 
   if (name == "unsigned" || name == "unsignedint") { return makeType(TypeKind::UInt32); }
 
-  if (name == "int16" || name == "int16_t") { return makeType(TypeKind::Int16); }
+  if (name == "int16" || name == "int16_t") return makeType(TypeKind::Int16);
 
-  if (name == "uint16" || name == "uint16_t") { return makeType(TypeKind::UInt16); }
+  if (name == "uint16" || name == "uint16_t") return makeType(TypeKind::UInt16);
 
-  if (name == "int32" || name == "int32_t") { return makeType(TypeKind::Int32); }
+  if (name == "int32" || name == "int32_t") return makeType(TypeKind::Int32);
 
-  if (name == "uint32" || name == "uint32_t") { return makeType(TypeKind::UInt32); }
+  if (name == "uint32" || name == "uint32_t") return makeType(TypeKind::UInt32);
 
   if (name == "longlong" || name == "longlongint" || name == "signedlonglong" ||
       name == "signedlonglongint") {
@@ -146,15 +180,15 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
 
   if (name == "long") return makeType(TypeKind::Int64);
 
-  if (name == "unsignedlong") { return makeType(TypeKind::UInt64); }
+  if (name == "unsignedlong") return makeType(TypeKind::UInt64);
 
-  if (name == "int64" || name == "int64_t") { return makeType(TypeKind::Int64); }
+  if (name == "int64" || name == "int64_t") return makeType(TypeKind::Int64);
 
-  if (name == "uint64" || name == "uint64_t") { return makeType(TypeKind::UInt64); }
+  if (name == "uint64" || name == "uint64_t") return makeType(TypeKind::UInt64);
 
-  if (name == "size" || name == "size_t") { return makeType(TypeKind::Size); }
+  if (name == "size" || name == "size_t") return makeType(TypeKind::Size);
 
-  if (name == "ssize" || name == "ssize_t") { return makeType(TypeKind::SSize); }
+  if (name == "ssize" || name == "ssize_t") return makeType(TypeKind::SSize);
 
   if (name == "float") return makeType(TypeKind::Float);
 
@@ -163,16 +197,16 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
   return nullptr;
 }
 
-std::shared_ptr<Type> parseStructType(const std::string &name) {
+std::shared_ptr<Type> parseStructType(const std::string &name, TypeContext *context) {
   if (name.size() <= 6) return nullptr;
 
-  if (name.compare(0, 6, "struct") != 0) { return nullptr; }
+  if (name.compare(0, 6, "struct") != 0) return nullptr;
 
   const std::string structName = name.substr(6);
 
-  if (structName.empty()) return nullptr;
+  if (structName.empty() || !context) return nullptr;
 
-  return makeStruct(structName, {});
+  return context->getOrCreateStruct(structName);
 }
 
 bool splitArguments(const std::string &source, std::vector<std::string> &arguments) {
@@ -265,7 +299,12 @@ bool splitFunction(const std::string &source, std::string &returnType, std::stri
 
   if (close == std::string::npos) return false;
 
-  if (!trim(source.substr(close + 1)).empty()) { return false; }
+  const std::string trailing = trim(source.substr(close + 1));
+
+  if (!trailing.empty() && trailing != "{}" &&
+      !(trailing.size() >= 2 && trailing.front() == '{' && trailing.back() == '}')) {
+    return false;
+  }
 
   const std::string prefix = trim(source.substr(0, open));
 
@@ -282,29 +321,33 @@ bool splitFunction(const std::string &source, std::string &returnType, std::stri
   return !returnType.empty() && !name.empty();
 }
 
-std::shared_ptr<Type> parseTypeName(const std::string &input);
+std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *context);
 
-std::shared_ptr<Type> parseParameterType(const std::string &input);
+std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context);
 
 class DeclaratorParser {
 public:
-  explicit DeclaratorParser(const std::string &source) : source_(source) {}
+  DeclaratorParser(const std::string &source, TypeContext *context)
+      : source_(source),
+        context_(context) {}
 
   bool parse(Declarator &declarator) {
     position_ = 0;
 
-    if (!parseDeclarator(declarator)) { return false; }
+    if (!parseDeclarator(declarator)) return false;
 
     return position_ == source_.size();
   }
 
 private:
-  bool parseIdentifier() {
-    if (position_ >= source_.size()) { return false; }
+  bool parseIdentifier(std::string &name) {
+    if (position_ >= source_.size()) return false;
 
     const unsigned char first = static_cast<unsigned char>(source_[position_]);
 
     if (!std::isalpha(first) && source_[position_] != '_') { return false; }
+
+    const std::size_t start = position_;
 
     ++position_;
 
@@ -316,18 +359,23 @@ private:
       ++position_;
     }
 
+    name = source_.substr(start, position_ - start);
+
     return true;
   }
 
   bool parseDeclarator(Declarator &declarator) {
     while (consume('*')) {
       DeclaratorOp pointer;
+
       pointer.kind = DeclaratorOp::Kind::Pointer;
 
       const Qualifiers qualifiers = parseQualifiers(source_, position_);
 
       pointer.isConst = qualifiers.isConst;
+
       pointer.isVolatile = qualifiers.isVolatile;
+
       pointer.isRestrict = qualifiers.isRestrict;
 
       declarator.pointers.push_back(std::move(pointer));
@@ -338,15 +386,15 @@ private:
 
       auto nested = std::make_shared<Declarator>();
 
-      if (!parseDeclarator(*nested)) { return false; }
+      if (!parseDeclarator(*nested)) return false;
 
-      if (!consume(')')) { return false; }
+      if (!consume(')')) return false;
 
       declarator.nested = std::move(nested);
     } else if (position_ < source_.size() &&
                (std::isalpha(static_cast<unsigned char>(source_[position_])) ||
                 source_[position_] == '_')) {
-      if (!parseIdentifier()) { return false; }
+      if (!parseIdentifier(declarator.name)) { return false; }
     }
 
     return parseSuffixes(declarator.suffixes);
@@ -357,9 +405,9 @@ private:
       if (source_[position_] == '[') {
         ++position_;
 
-        if (position_ >= source_.size()) { return false; }
+        if (position_ >= source_.size()) return false;
 
-        if (source_[position_] == ']') { return false; }
+        if (source_[position_] == ']') return false;
 
         std::size_t count = 0;
 
@@ -373,16 +421,20 @@ private:
           if (count > (std::numeric_limits<std::size_t>::max() - digit) / 10) { return false; }
 
           count = count * 10 + digit;
+
           ++position_;
         }
 
-        if (!consume(']')) { return false; }
+        if (!consume(']')) return false;
 
         DeclaratorOp array;
+
         array.kind = DeclaratorOp::Kind::Array;
+
         array.count = count;
 
         suffixes.push_back(std::move(array));
+
         continue;
       }
 
@@ -390,6 +442,7 @@ private:
         ++position_;
 
         const std::size_t start = position_;
+
         std::size_t depth = 1;
 
         while (position_ < source_.size() && depth != 0) {
@@ -401,16 +454,17 @@ private:
             --depth;
           }
 
-          if (depth != 0) { ++position_; }
+          if (depth != 0) ++position_;
         }
 
-        if (depth != 0) { return false; }
+        if (depth != 0) return false;
 
         const std::string argumentSource = source_.substr(start, position_ - start);
 
         ++position_;
 
         DeclaratorOp function;
+
         function.kind = DeclaratorOp::Kind::Function;
 
         std::vector<std::string> arguments;
@@ -426,20 +480,21 @@ private:
           const std::string argumentSourceItem = trim(arguments[i]);
 
           if (argumentSourceItem == "...") {
-            if (i + 1 != arguments.size()) { return false; }
+            if (i + 1 != arguments.size()) return false;
 
             function.variadic = true;
             continue;
           }
 
-          std::shared_ptr<Type> argument = parseParameterType(argumentSourceItem);
+          std::shared_ptr<Type> argument = parseParameterType(argumentSourceItem, context_);
 
-          if (!argument) { return false; }
+          if (!argument) return false;
 
           function.arguments.push_back(std::move(argument));
         }
 
         suffixes.push_back(std::move(function));
+
         continue;
       }
 
@@ -453,10 +508,12 @@ private:
     if (position_ >= source_.size() || source_[position_] != character) { return false; }
 
     ++position_;
+
     return true;
   }
 
   const std::string &source_;
+  TypeContext *context_ = nullptr;
   std::size_t position_ = 0;
 };
 
@@ -464,8 +521,11 @@ std::shared_ptr<Type> makePointer(std::shared_ptr<Type> element, const Declarato
   auto pointer = makeType(TypeKind::Pointer);
 
   pointer->element = std::move(element);
+
   pointer->isConst = operation.isConst;
+
   pointer->isVolatile = operation.isVolatile;
+
   pointer->isRestrict = operation.isRestrict;
 
   return pointer;
@@ -476,6 +536,7 @@ std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
   for (const DeclaratorOp &operation : suffixes) {
     if (operation.kind == DeclaratorOp::Kind::Array) {
       type = makeArray(std::move(type), operation.count);
+
       continue;
     }
 
@@ -485,7 +546,9 @@ std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
       auto signature = std::make_shared<Signature>();
 
       signature->returns = std::move(type);
+
       signature->args = operation.arguments;
+
       signature->variadic = operation.variadic;
 
       function->functionSignature = std::move(signature);
@@ -509,10 +572,18 @@ std::shared_ptr<Type> applyDeclarator(std::shared_ptr<Type> type, const Declarat
   return type;
 }
 
-std::shared_ptr<Type> parseTypeName(const std::string &input) {
+std::string declaratorName(const Declarator &declarator) {
+  if (!declarator.name.empty()) return declarator.name;
+
+  if (declarator.nested) return declaratorName(*declarator.nested);
+
+  return {};
+}
+
+std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *context) {
   std::string source = removeWhitespace(input);
 
-  if (source.empty()) { return nullptr; }
+  if (source.empty()) return nullptr;
 
   std::size_t qualifierPosition = 0;
 
@@ -520,7 +591,7 @@ std::shared_ptr<Type> parseTypeName(const std::string &input) {
 
   source.erase(0, qualifierPosition);
 
-  if (source.empty()) { return nullptr; }
+  if (source.empty()) return nullptr;
 
   const std::size_t declaratorStart = source.find_first_of("*([");
 
@@ -532,9 +603,9 @@ std::shared_ptr<Type> parseTypeName(const std::string &input) {
 
   std::shared_ptr<Type> type = parseBaseType(baseName);
 
-  if (!type) { type = parseStructType(baseName); }
+  if (!type) type = parseStructType(baseName, context);
 
-  if (!type) { return nullptr; }
+  if (!type) return nullptr;
 
   type->isConst = baseQualifiers.isConst;
 
@@ -542,24 +613,25 @@ std::shared_ptr<Type> parseTypeName(const std::string &input) {
 
   type->isRestrict = baseQualifiers.isRestrict;
 
-  if (declaratorSource.empty()) { return type; }
+  if (declaratorSource.empty()) return type;
 
   Declarator declarator;
-  DeclaratorParser parser(declaratorSource);
 
-  if (!parser.parse(declarator)) { return nullptr; }
+  DeclaratorParser parser(declaratorSource, context);
+
+  if (!parser.parse(declarator)) return nullptr;
 
   return applyDeclarator(std::move(type), declarator);
 }
 
-std::shared_ptr<Type> parseParameterType(const std::string &input) {
+std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context) {
   const std::string candidate = trim(input);
 
-  if (candidate.empty()) { return nullptr; }
+  if (candidate.empty()) return nullptr;
 
-  std::shared_ptr<Type> type = parseTypeName(candidate);
+  std::shared_ptr<Type> type = parseTypeName(candidate, context);
 
-  if (type) { return type; }
+  if (type) return type;
 
   std::size_t split = candidate.size();
 
@@ -578,40 +650,233 @@ std::shared_ptr<Type> parseParameterType(const std::string &input) {
     break;
   }
 
-  if (split == nameEnd) { return nullptr; }
+  if (split == nameEnd) return nullptr;
 
   const std::string candidateType = trim(candidate.substr(0, split));
 
-  if (candidateType.empty()) { return nullptr; }
+  if (candidateType.empty()) return nullptr;
 
-  return parseTypeName(candidateType);
+  return parseTypeName(candidateType, context);
 }
 
-} // namespace
-
-bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::string &error) {
-  type.reset();
-  error.clear();
+bool parseFieldDeclaration(const std::string &source, TypeContext *context, Field &field,
+                           std::string &error) {
+  field = Field{};
 
   const std::string input = trim(source);
 
   if (input.empty()) {
-    error = "empty type";
+    error = "empty struct field";
     return false;
   }
 
-  type = parseTypeName(input);
+  std::size_t split = input.size();
 
-  if (!type) {
-    error = "unsupported type: " + input;
+  while (split > 0 && std::isspace(static_cast<unsigned char>(input[split - 1]))) { --split; }
+
+  std::size_t nameEnd = split;
+
+  while (split > 0) {
+    const char character = input[split - 1];
+
+    if (std::isalnum(static_cast<unsigned char>(character)) || character == '_') {
+      --split;
+      continue;
+    }
+
+    break;
+  }
+
+  if (split == nameEnd) {
+    error = "struct field requires a name: " + input;
     return false;
   }
+
+  const std::string name = input.substr(split, nameEnd - split);
+
+  std::string typeSource = trim(input.substr(0, split));
+
+  std::shared_ptr<Type> type;
+
+  if (!parseType(typeSource, type, error, context)) {
+    error = "unsupported struct field type: " + typeSource;
+    return false;
+  }
+
+  field.name = name;
+  field.type = std::move(type);
 
   return true;
 }
 
-bool parseFunctionDeclaration(const std::string &source, ParsedFunction &function,
-                              std::string &error) {
+bool splitStructFields(const std::string &source, std::vector<std::string> &fields) {
+  fields.clear();
+
+  std::size_t start = 0;
+  std::size_t parentheses = 0;
+  std::size_t brackets = 0;
+
+  for (std::size_t i = 0; i < source.size(); ++i) {
+    const char character = source[i];
+
+    if (character == '(') {
+      ++parentheses;
+      continue;
+    }
+
+    if (character == ')') {
+      if (parentheses == 0) return false;
+
+      --parentheses;
+      continue;
+    }
+
+    if (character == '[') {
+      ++brackets;
+      continue;
+    }
+
+    if (character == ']') {
+      if (brackets == 0) return false;
+
+      --brackets;
+      continue;
+    }
+
+    if (character != ';') continue;
+
+    if (parentheses != 0 || brackets != 0) continue;
+
+    const std::string field = trim(source.substr(start, i - start));
+
+    if (field.empty()) return false;
+
+    fields.push_back(field);
+    start = i + 1;
+  }
+
+  if (parentheses != 0 || brackets != 0) return false;
+
+  const std::string trailing = trim(source.substr(start));
+
+  return trailing.empty();
+}
+
+bool parseStructDefinition(const std::string &source, TypeContext *context, std::string &error) {
+  error.clear();
+
+  const std::string input = trim(source);
+
+  if (input.size() < 9 || input.compare(0, 6, "struct") != 0) {
+    error = "invalid struct definition";
+    return false;
+  }
+
+  std::size_t position = 6;
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) {
+    error = "struct definition requires a name";
+    return false;
+  }
+
+  const std::string name = input.substr(nameStart, position - nameStart);
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  if (position >= input.size() || input[position] != '{') {
+    error = "expected '{' after struct name";
+    return false;
+  }
+
+  const std::size_t bodyStart = position + 1;
+
+  std::size_t depth = 1;
+  std::size_t bodyEnd = std::string::npos;
+
+  for (std::size_t i = bodyStart; i < input.size(); ++i) {
+    if (input[i] == '{') {
+      ++depth;
+      continue;
+    }
+
+    if (input[i] == '}') {
+      --depth;
+
+      if (depth == 0) {
+        bodyEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (bodyEnd == std::string::npos) {
+    error = "unterminated struct definition";
+    return false;
+  }
+
+  if (!trim(input.substr(bodyEnd + 1)).empty()) {
+    error = "unexpected tokens after struct definition";
+    return false;
+  }
+
+  const std::string body = input.substr(bodyStart, bodyEnd - bodyStart);
+
+  std::vector<std::string> fieldSources;
+
+  if (!splitStructFields(body, fieldSources)) {
+    error = "invalid struct field list";
+    return false;
+  }
+
+  if (fieldSources.empty()) {
+    error = "struct must contain at least one field";
+    return false;
+  }
+
+  std::vector<Field> fields;
+
+  try {
+    fields.reserve(fieldSources.size());
+  } catch (...) {
+    error = "struct field allocation failed";
+    return false;
+  }
+
+  for (const std::string &fieldSource : fieldSources) {
+    Field field;
+
+    if (!parseFieldDeclaration(fieldSource, context, field, error)) { return false; }
+
+    fields.push_back(std::move(field));
+  }
+
+  auto structType = context->getOrCreateStruct(name);
+
+  if (!structType) {
+    error = "failed to create struct: " + name;
+    return false;
+  }
+
+  structType->fields = std::move(fields);
+
+  return true;
+}
+
+bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction &function,
+                                      std::string &error, TypeContext *context) {
   function = ParsedFunction{};
   error.clear();
 
@@ -631,15 +896,15 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
     return false;
   }
 
-  std::shared_ptr<Type> parsedReturn;
-  std::string parseError;
+  std::shared_ptr<Type> parsedReturn = parseTypeName(returnType, context);
 
-  if (!parseType(returnType, parsedReturn, parseError)) {
-    error = parseError;
+  if (!parsedReturn) {
+    error = "unsupported return type: " + returnType;
     return false;
   }
 
   Signature signature;
+
   signature.returns = std::move(parsedReturn);
 
   std::vector<std::string> arguments;
@@ -671,7 +936,7 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
       return false;
     }
 
-    std::shared_ptr<Type> argument = parseParameterType(candidate);
+    std::shared_ptr<Type> argument = parseParameterType(candidate, context);
 
     if (!argument) {
       error = "unsupported function argument: " + candidate;
@@ -680,20 +945,85 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
 
     signature.args.push_back(std::move(argument));
   }
-  if (!prepareSignature(signature)) {
-    error = "failed to prepare function signature";
-    return false;
-  }
 
   function.name = std::move(name);
+
   function.signature = std::move(signature);
 
   return true;
 }
 
+bool isStructDefinition(const std::string &source) {
+  const std::string input = trim(source);
+
+  if (input.size() < 6 || input.compare(0, 6, "struct") != 0) { return false; }
+
+  std::size_t position = 6;
+
+  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
+    return false;
+  }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) return false;
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  return position < input.size() && input[position] == '{';
+}
+
+} // namespace
+
+bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::string &error,
+               TypeContext *context) {
+  type.reset();
+  error.clear();
+
+  const std::string input = trim(source);
+
+  if (input.empty()) {
+    error = "empty type";
+    return false;
+  }
+
+  TypeContext localContext;
+
+  if (!context) context = &localContext;
+
+  type = parseTypeName(input, context);
+
+  if (!type) {
+    error = "unsupported type: " + input;
+    return false;
+  }
+
+  return true;
+}
+
+bool parseFunctionDeclaration(const std::string &source, ParsedFunction &function,
+                              std::string &error) {
+  TypeContext context;
+
+  return parseFunctionDeclarationInternal(source, function, error, &context);
+}
+
 bool parseCSource(const std::string &source, ParsedCSource &result, std::string &error) {
   result = ParsedCSource{};
   error.clear();
+
+  auto context = std::make_shared<TypeContext>();
 
   std::size_t start = 0;
   std::size_t parentheses = 0;
@@ -741,13 +1071,21 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
       start = i + 1;
 
-      if (declaration.empty()) { continue; }
+      if (declaration.empty()) continue;
+
+      if (isStructDefinition(declaration)) {
+        if (!parseStructDefinition(declaration, context.get(), error)) { return false; }
+
+        continue;
+      }
 
       if (declaration.find('(') == std::string::npos) { continue; }
 
       ParsedFunction function;
 
-      if (!parseFunctionDeclaration(declaration, function, error)) { return false; }
+      if (!parseFunctionDeclarationInternal(declaration, function, error, context.get())) {
+        return false;
+      }
 
       result.functions.push_back(std::move(function));
     }
@@ -762,6 +1100,8 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
     error = "unmatched '{'";
     return false;
   }
+
+  result.context = std::move(context);
 
   return true;
 }

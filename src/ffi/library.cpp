@@ -1,13 +1,14 @@
 #include "library.hpp"
 
+#include "parser.hpp"
+
 #include <dlfcn.h>
 #include <libtcc.h>
 
 #include <new>
 #include <string>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 namespace {
 
@@ -16,8 +17,7 @@ struct CompilerDiagnostic {
 };
 
 void compilerErrorCallback(void *opaque, const char *message) {
-  if (!opaque || !message)
-    return;
+  if (!opaque || !message) return;
 
   auto *diagnostic = static_cast<CompilerDiagnostic *>(opaque);
   diagnostic->output += message;
@@ -25,12 +25,10 @@ void compilerErrorCallback(void *opaque, const char *message) {
 
 } // namespace
 
-NativeModuleState::NativeModuleState(NativeModuleKind moduleKind)
-    : kind(moduleKind) {}
+NativeModuleState::NativeModuleState(NativeModuleKind moduleKind) : kind(moduleKind) {}
 
 NativeModuleState::~NativeModuleState() {
-  if (!handle)
-    return;
+  if (!handle) return;
 
   if (kind == NativeModuleKind::TCC) {
     tcc_delete(static_cast<TCCState *>(handle));
@@ -42,8 +40,7 @@ NativeModuleState::~NativeModuleState() {
 }
 
 void *NativeModuleState::resolve(const std::string &name) const {
-  if (!handle || name.empty())
-    return nullptr;
+  if (!handle || name.empty()) return nullptr;
 
   if (kind == NativeModuleKind::TCC) {
     TCCState *state = static_cast<TCCState *>(handle);
@@ -55,9 +52,9 @@ void *NativeModuleState::resolve(const std::string &name) const {
   return dlsym(handle, name.c_str());
 }
 
-std::shared_ptr<NativeModuleState>
-NativeModuleState::compile(const std::string &source, std::string &error,
-                           NativeCompileDiagnostic &diagnostic) {
+std::shared_ptr<NativeModuleState> NativeModuleState::compile(const std::string &source,
+                                                              std::string &error,
+                                                              NativeCompileDiagnostic &diagnostic) {
   error.clear();
   diagnostic.message.clear();
   diagnostic.source = source;
@@ -98,11 +95,21 @@ NativeModuleState::compile(const std::string &source, std::string &error,
     return nullptr;
   }
 
+  ParsedCSource parsedSource;
+  std::string parseError;
+
+  if (!parseCSource(source, parsedSource, parseError)) {
+    error = "C source parsing failed";
+    diagnostic.message = parseError;
+    tcc_delete(state);
+    return nullptr;
+  }
+
   try {
-    auto module =
-        std::make_shared<NativeModuleState>(NativeModuleKind::TCC);
+    auto module = std::make_shared<NativeModuleState>(NativeModuleKind::TCC);
 
     module->handle = state;
+    module->typeContext = std::move(parsedSource.context);
 
     return module;
   } catch (const std::bad_alloc &) {
@@ -116,8 +123,8 @@ NativeModuleState::compile(const std::string &source, std::string &error,
   }
 }
 
-std::shared_ptr<NativeModuleState>
-NativeModuleState::load(const std::string &path, std::string &error) {
+std::shared_ptr<NativeModuleState> NativeModuleState::load(const std::string &path,
+                                                           std::string &error) {
   error.clear();
 
   if (path.empty()) {
@@ -136,9 +143,7 @@ NativeModuleState::load(const std::string &path, std::string &error) {
   }
 
   try {
-    auto module =
-        std::make_shared<NativeModuleState>(
-            NativeModuleKind::DynamicLibrary);
+    auto module = std::make_shared<NativeModuleState>(NativeModuleKind::DynamicLibrary);
 
     module->handle = handle;
 
@@ -154,5 +159,4 @@ NativeModuleState::load(const std::string &path, std::string &error) {
   }
 }
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

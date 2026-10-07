@@ -5,6 +5,8 @@
 
 namespace edon { namespace ffi {
 
+class TypeContext;
+
 enum class NativeModuleKind { TCC, DynamicLibrary };
 
 struct NativeCompileDiagnostic {
@@ -29,6 +31,7 @@ public:
 
   NativeModuleKind kind;
   void *handle = nullptr;
+  std::shared_ptr<TypeContext> typeContext;
 };
 
 }} // namespace edon::ffi

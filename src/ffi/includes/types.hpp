@@ -7,8 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 enum class TypeKind {
   Void,
@@ -27,9 +26,9 @@ enum class TypeKind {
   Float,
   Double,
   Pointer,
-  Function,
   Struct,
-  Array
+  Array,
+  Function
 };
 
 struct Type;
@@ -75,13 +74,9 @@ struct Type {
 
 std::shared_ptr<Type> makeType(TypeKind kind);
 
-std::shared_ptr<Type> makeStruct(
-    const std::string &name,
-    std::vector<Field> fields);
+std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fields);
 
-std::shared_ptr<Type> makeArray(
-    std::shared_ptr<Type> element,
-    std::size_t count);
+std::shared_ptr<Type> makeArray(std::shared_ptr<Type> element, std::size_t count);
 
 bool prepareType(const std::shared_ptr<Type> &type);
 
@@ -95,5 +90,4 @@ bool isFloating(TypeKind kind);
 bool isPointer(TypeKind kind);
 bool isAggregate(TypeKind kind);
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

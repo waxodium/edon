@@ -3,7 +3,6 @@
 
 #include <ffi.h>
 
-#include <algorithm>
 #include <limits>
 #include <new>
 #include <unordered_set>
@@ -78,6 +77,7 @@ bool prepareFunction(Type &type) {
   if (!prepareSignature(*type.functionSignature)) return false;
 
   type.complete = true;
+
   return true;
 }
 
@@ -130,13 +130,20 @@ bool prepareStruct(Type &type) {
     return false;
   }
 
+  if (aggregate->size == 0 || aggregate->alignment == 0) {
+    delete[] elementStorage;
+    delete aggregate;
+    return false;
+  }
+
   type.ffi = aggregate;
   type.size = aggregate->size;
   type.alignment = aggregate->alignment;
 
-  for (std::size_t i = 0; i < type.fields.size(); ++i) { type.fields[i].offset = offsets[i]; }
+  for (std::size_t i = 0; i < type.fields.size(); ++i) type.fields[i].offset = offsets[i];
 
   type.complete = true;
+
   return true;
 }
 
@@ -147,7 +154,7 @@ bool prepareArray(Type &type) {
 
   if (!type.element->ffi) return false;
 
-  if (type.count == std::numeric_limits<std::size_t>::max()) { return false; }
+  if (type.count == std::numeric_limits<std::size_t>::max()) return false;
 
   const std::size_t elementCount = type.count + 1;
 
@@ -157,7 +164,7 @@ bool prepareArray(Type &type) {
     elements.resize(elementCount);
   } catch (...) { return false; }
 
-  for (std::size_t i = 0; i < type.count; ++i) { elements[i] = type.element->ffi; }
+  for (std::size_t i = 0; i < type.count; ++i) elements[i] = type.element->ffi;
 
   elements[type.count] = nullptr;
 
@@ -172,7 +179,7 @@ bool prepareArray(Type &type) {
     return false;
   }
 
-  std::copy(elements.begin(), elements.end(), elementStorage);
+  for (std::size_t i = 0; i < elements.size(); ++i) elementStorage[i] = elements[i];
 
   aggregate->size = 0;
   aggregate->alignment = 0;
@@ -200,7 +207,7 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
 
   if (type->complete && type->ffi) return true;
 
-  if (type->kind == TypeKind::Function && type->complete) { return true; }
+  if (type->kind == TypeKind::Function && type->complete) return true;
 
   if (isPreparing(type.get())) return false;
 
@@ -246,6 +253,7 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   }
 
   endPreparing(type.get());
+
   return result;
 }
 
@@ -300,7 +308,7 @@ bool prepareType(const std::shared_ptr<Type> &type) { return prepareTypeInternal
 bool prepareSignature(Signature &signature) {
   if (!signature.returns) return false;
 
-  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) { return false; }
+  if (signature.args.size() > std::numeric_limits<unsigned int>::max()) return false;
 
   if (!prepareType(signature.returns)) return false;
 
@@ -319,14 +327,12 @@ bool prepareSignature(Signature &signature) {
 
     if (!argument->ffi) return false;
 
-    try {
-      ffiArgs.push_back(argument->ffi);
-    } catch (...) { return false; }
+    ffiArgs.push_back(argument->ffi);
   }
 
   ffi_cif cif{};
 
-  ffi_status status = FFI_BAD_TYPEDEF;
+  ffi_status status;
 
   if (signature.variadic) {
     const unsigned int fixedCount = static_cast<unsigned int>(ffiArgs.size());
@@ -346,7 +352,6 @@ bool prepareSignature(Signature &signature) {
 
   return true;
 }
-
 const char *typeName(TypeKind kind) {
   switch (kind) {
   case TypeKind::Void: return "void";

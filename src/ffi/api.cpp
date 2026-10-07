@@ -3,25 +3,16 @@
 #include "errors.hpp"
 #include "module.hpp"
 
-namespace edon {
-namespace ffi {
+namespace edon { namespace ffi {
 
 void registerNamespace(JSGlobalContextRef context) {
   (void)context;
   initializeModuleClasses();
 }
 
-JSValueRef requireModule(
-    JSContextRef context,
-    const std::string &name,
-    JSValueRef *error) {
-
+JSValueRef requireModule(JSContextRef context, const std::string &name, JSValueRef *error) {
   if (name != "edon:ffi") {
-    throwError(
-        context,
-        error,
-        ErrorCode::ModuleNotFound,
-        name);
+    throwError(context, error, ErrorCode::ModuleNotFound, name);
 
     return JSValueMakeUndefined(context);
   }
@@ -29,5 +20,4 @@ JSValueRef requireModule(
   return requireFFIModule(context, error);
 }
 
-} // namespace ffi
-} // namespace edon
+}} // namespace edon::ffi

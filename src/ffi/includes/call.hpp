@@ -1,8 +1,8 @@
 #pragma once
 
 #include "function.hpp"
-#include "types.hpp"
 #include "signature.hpp"
+#include "types.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
