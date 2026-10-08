@@ -18,8 +18,15 @@ public:
 
   bool defineStruct(const std::string &name, std::vector<Field> fields);
 
+  std::shared_ptr<Type> findEnum(const std::string &name) const;
+
+  std::shared_ptr<Type> getOrCreateEnum(const std::string &name);
+
+  bool defineEnum(const std::string &name, std::vector<EnumValue> values);
+
 private:
   std::unordered_map<std::string, std::shared_ptr<Type>> structs_;
+  std::unordered_map<std::string, std::shared_ptr<Type>> enums_;
 };
 
 struct ParsedFunction {

@@ -2,6 +2,7 @@
 #include "signature.hpp"
 
 #include <cctype>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -38,6 +39,38 @@ bool TypeContext::defineStruct(const std::string &name, std::vector<Field> field
   if (!type || type->complete) return false;
 
   type->fields = std::move(fields);
+
+  return prepareType(type);
+}
+
+std::shared_ptr<Type> TypeContext::findEnum(const std::string &name) const {
+  const auto it = enums_.find(name);
+
+  if (it == enums_.end()) return nullptr;
+
+  return it->second;
+}
+
+std::shared_ptr<Type> TypeContext::getOrCreateEnum(const std::string &name) {
+  const auto it = enums_.find(name);
+
+  if (it != enums_.end()) return it->second;
+
+  auto type = makeEnum(name, {});
+
+  if (!type) return nullptr;
+
+  enums_.emplace(name, type);
+
+  return type;
+}
+
+bool TypeContext::defineEnum(const std::string &name, std::vector<EnumValue> values) {
+  auto type = getOrCreateEnum(name);
+
+  if (!type || type->complete) return false;
+
+  type->enumValues = std::move(values);
 
   return prepareType(type);
 }
@@ -369,6 +402,18 @@ std::shared_ptr<Type> parseStructType(const std::string &name, TypeContext *cont
   return context->getOrCreateStruct(structName);
 }
 
+std::shared_ptr<Type> parseEnumType(const std::string &name, TypeContext *context) {
+  if (name.size() <= 4) return nullptr;
+
+  if (name.compare(0, 4, "enum") != 0) { return nullptr; }
+
+  const std::string enumName = name.substr(4);
+
+  if (enumName.empty() || !context) { return nullptr; }
+
+  return context->findEnum(enumName);
+}
+
 bool splitArguments(const std::string &source, std::vector<std::string> &arguments) {
   arguments.clear();
 
@@ -501,7 +546,7 @@ public:
 
 private:
   bool parseIdentifier(std::string &name) {
-    if (position_ >= source_.size()) return false;
+    if (position_ >= source_.size()) { return false; }
 
     const unsigned char first = static_cast<unsigned char>(source_[position_]);
 
@@ -583,7 +628,7 @@ private:
           ++position_;
         }
 
-        if (!consume(']')) return false;
+        if (!consume(']')) { return false; }
 
         DeclaratorOp array;
 
@@ -681,7 +726,9 @@ std::shared_ptr<Type> makePointer(std::shared_ptr<Type> element, const Declarato
   pointer->element = std::move(element);
 
   pointer->isConst = operation.isConst;
+
   pointer->isVolatile = operation.isVolatile;
+
   pointer->isRestrict = operation.isRestrict;
 
   return pointer;
@@ -761,6 +808,8 @@ std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *conte
 
   if (!type) { type = parseStructType(baseName, context); }
 
+  if (!type) { type = parseEnumType(baseName, context); }
+
   if (!type) return nullptr;
 
   type->isConst = baseQualifiers.isConst;
@@ -783,7 +832,7 @@ std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *conte
 std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context) {
   const std::string candidate = trim(input);
 
-  if (candidate.empty()) return nullptr;
+  if (candidate.empty()) { return nullptr; }
 
   std::shared_ptr<Type> type = parseTypeName(candidate, context);
 
@@ -806,7 +855,7 @@ std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *
     break;
   }
 
-  if (split == nameEnd) return nullptr;
+  if (split == nameEnd) { return nullptr; }
 
   const std::string candidateType = trim(candidate.substr(0, split));
 
@@ -916,7 +965,7 @@ bool splitStructFields(const std::string &source, std::vector<std::string> &fiel
     }
 
     if (character == ')') {
-      if (parentheses == 0) return false;
+      if (parentheses == 0) { return false; }
 
       --parentheses;
       continue;
@@ -928,19 +977,19 @@ bool splitStructFields(const std::string &source, std::vector<std::string> &fiel
     }
 
     if (character == ']') {
-      if (brackets == 0) return false;
+      if (brackets == 0) { return false; }
 
       --brackets;
       continue;
     }
 
-    if (character != ';') continue;
+    if (character != ';') { continue; }
 
     if (parentheses != 0 || brackets != 0) { continue; }
 
     const std::string field = trim(source.substr(start, i - start));
 
-    if (field.empty()) return false;
+    if (field.empty()) { return false; }
 
     fields.push_back(field);
 
@@ -1067,6 +1116,189 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
   return true;
 }
 
+bool parseEnumDefinition(const std::string &source, TypeContext *context, std::string &error) {
+  error.clear();
+
+  const std::string input = trim(source);
+
+  if (input.size() < 7 || input.compare(0, 4, "enum") != 0) {
+    error = "invalid enum definition";
+    return false;
+  }
+
+  std::size_t position = 4;
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) {
+    error = "enum definition requires a name";
+    return false;
+  }
+
+  const std::string name = input.substr(nameStart, position - nameStart);
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  if (position >= input.size() || input[position] != '{') {
+    error = "expected '{' after enum name";
+    return false;
+  }
+
+  const std::size_t bodyStart = position + 1;
+
+  std::size_t depth = 1;
+  std::size_t bodyEnd = std::string::npos;
+
+  for (std::size_t i = bodyStart; i < input.size(); ++i) {
+    if (input[i] == '{') {
+      ++depth;
+      continue;
+    }
+
+    if (input[i] == '}') {
+      --depth;
+
+      if (depth == 0) {
+        bodyEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (bodyEnd == std::string::npos) {
+    error = "unterminated enum definition";
+    return false;
+  }
+
+  if (!trim(input.substr(bodyEnd + 1)).empty()) {
+    error = "unexpected tokens after enum definition";
+    return false;
+  }
+
+  const std::string body = trim(input.substr(bodyStart, bodyEnd - bodyStart));
+
+  if (body.empty()) {
+    error = "enum must contain at least one value";
+    return false;
+  }
+
+  std::vector<EnumValue> values;
+
+  std::size_t start = 0;
+  std::int64_t nextValue = 0;
+
+  while (start <= body.size()) {
+    const std::size_t comma = body.find(',', start);
+
+    const std::string item =
+        trim(body.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+
+    if (item.empty()) {
+      error = "empty enum value";
+      return false;
+    }
+
+    const std::size_t equal = item.find('=');
+
+    std::string valueName;
+    std::string valueExpression;
+
+    if (equal == std::string::npos) {
+      valueName = trim(item);
+    } else {
+      valueName = trim(item.substr(0, equal));
+
+      valueExpression = trim(item.substr(equal + 1));
+
+      if (valueExpression.empty()) {
+        error = "enum value requires an initializer: " + valueName;
+        return false;
+      }
+    }
+
+    if (valueName.empty()) {
+      error = "enum value requires a name";
+      return false;
+    }
+
+    if (!std::isalpha(static_cast<unsigned char>(valueName[0])) && valueName[0] != '_') {
+      error = "invalid enum value name: " + valueName;
+      return false;
+    }
+
+    for (char character : valueName) {
+      if (!std::isalnum(static_cast<unsigned char>(character)) && character != '_') {
+        error = "invalid enum value name: " + valueName;
+        return false;
+      }
+    }
+
+    for (const EnumValue &existing : values) {
+      if (existing.name == valueName) {
+        error = "duplicate enum value: " + valueName;
+        return false;
+      }
+    }
+
+    std::int64_t value = nextValue;
+
+    if (!valueExpression.empty()) {
+      std::size_t parsed = 0;
+
+      try {
+        value = std::stoll(valueExpression, &parsed, 0);
+      } catch (...) {
+        error = "invalid enum value: " + valueExpression;
+        return false;
+      }
+
+      if (parsed != valueExpression.size()) {
+        error = "invalid enum value: " + valueExpression;
+        return false;
+      }
+    }
+
+    if (value > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()) ||
+        value < static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())) {
+      error = "enum value outside int32 range: " + valueName;
+      return false;
+    }
+
+    values.push_back(EnumValue{valueName, value});
+
+    if (value == std::numeric_limits<std::int64_t>::max()) {
+      if (comma != std::string::npos) {
+        error = "enum value overflow";
+        return false;
+      }
+    } else {
+      nextValue = value + 1;
+    }
+
+    if (comma == std::string::npos) { break; }
+
+    start = comma + 1;
+  }
+
+  if (!context->defineEnum(name, std::move(values))) {
+    error = "failed to define enum: " + name;
+    return false;
+  }
+
+  return true;
+}
+
 bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction &function,
                                       std::string &error, TypeContext *context) {
   function = ParsedFunction{};
@@ -1151,6 +1383,37 @@ bool isStructDefinition(const std::string &source) {
   if (input.size() < 6 || input.compare(0, 6, "struct") != 0) { return false; }
 
   std::size_t position = 6;
+
+  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
+    return false;
+  }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) { return false; }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  return position < input.size() && input[position] == '{';
+}
+
+bool isEnumDefinition(const std::string &source) {
+  const std::string input = trim(source);
+
+  if (input.size() < 4 || input.compare(0, 4, "enum") != 0) { return false; }
+
+  std::size_t position = 4;
 
   if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
     return false;
@@ -1269,6 +1532,12 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
       if (isStructDefinition(declaration)) {
         if (!parseStructDefinition(declaration, context.get(), error)) { return false; }
+
+        continue;
+      }
+
+      if (isEnumDefinition(declaration)) {
+        if (!parseEnumDefinition(declaration, context.get(), error)) { return false; }
 
         continue;
       }

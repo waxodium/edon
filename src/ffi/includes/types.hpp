@@ -3,6 +3,7 @@
 #include <ffi.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,7 +29,8 @@ enum class TypeKind {
   Pointer,
   Struct,
   Array,
-  Function
+  Function,
+  Enum
 };
 
 struct Type;
@@ -38,6 +40,11 @@ struct Field {
   std::string name;
   std::shared_ptr<Type> type;
   std::size_t offset = 0;
+};
+
+struct EnumValue {
+  std::string name;
+  std::int64_t value = 0;
 };
 
 struct Type {
@@ -56,6 +63,7 @@ struct Type {
   ffi_type *ffi = nullptr;
 
   std::vector<Field> fields;
+  std::vector<EnumValue> enumValues;
 
   std::shared_ptr<Type> element;
   std::size_t count = 0;
@@ -75,6 +83,8 @@ struct Type {
 std::shared_ptr<Type> makeType(TypeKind kind);
 
 std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fields);
+
+std::shared_ptr<Type> makeEnum(const std::string &name, std::vector<EnumValue> values);
 
 std::shared_ptr<Type> makeArray(std::shared_ptr<Type> element, std::size_t count);
 

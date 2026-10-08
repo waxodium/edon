@@ -39,6 +39,8 @@ ffi_type *primitiveFFIType(TypeKind kind) {
 
   case TypeKind::UInt64: return &ffi_type_uint64;
 
+  case TypeKind::Enum: return &ffi_type_sint32;
+
   case TypeKind::Size:
     if constexpr (sizeof(std::size_t) == 4) return &ffi_type_uint32;
     else
@@ -202,6 +204,21 @@ bool prepareArray(Type &type) {
   return true;
 }
 
+bool prepareEnum(Type &type) {
+  if (type.complete && type.ffi) return true;
+
+  if (type.enumValues.empty()) return false;
+
+  ffi_type *ffi = &ffi_type_sint32;
+
+  type.ffi = ffi;
+  type.size = ffi->size;
+  type.alignment = ffi->alignment;
+  type.complete = true;
+
+  return true;
+}
+
 bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   if (!type) return false;
 
@@ -232,6 +249,8 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
     case TypeKind::Struct: result = prepareStruct(*type); break;
 
     case TypeKind::Array: result = prepareArray(*type); break;
+
+    case TypeKind::Enum: result = prepareEnum(*type); break;
 
     case TypeKind::Void:
     case TypeKind::Bool:
@@ -289,6 +308,16 @@ std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fie
   type->kind = TypeKind::Struct;
   type->name = name;
   type->fields = std::move(fields);
+
+  return type;
+}
+
+std::shared_ptr<Type> makeEnum(const std::string &name, std::vector<EnumValue> values) {
+  auto type = std::make_shared<Type>();
+
+  type->kind = TypeKind::Enum;
+  type->name = name;
+  type->enumValues = std::move(values);
 
   return type;
 }
@@ -391,6 +420,8 @@ const char *typeName(TypeKind kind) {
   case TypeKind::Struct: return "struct";
 
   case TypeKind::Array: return "array";
+
+  case TypeKind::Enum: return "enum";
   }
 
   return "unknown";
@@ -402,12 +433,13 @@ bool isInteger(TypeKind kind) {
   return kind == TypeKind::Bool || kind == TypeKind::Char || kind == TypeKind::Int8 ||
          kind == TypeKind::UInt8 || kind == TypeKind::Int16 || kind == TypeKind::UInt16 ||
          kind == TypeKind::Int32 || kind == TypeKind::UInt32 || kind == TypeKind::Int64 ||
-         kind == TypeKind::UInt64 || kind == TypeKind::Size || kind == TypeKind::SSize;
+         kind == TypeKind::UInt64 || kind == TypeKind::Size || kind == TypeKind::SSize ||
+         kind == TypeKind::Enum;
 }
 
 bool isSignedInteger(TypeKind kind) {
   return kind == TypeKind::Int8 || kind == TypeKind::Int16 || kind == TypeKind::Int32 ||
-         kind == TypeKind::Int64 || kind == TypeKind::SSize;
+         kind == TypeKind::Int64 || kind == TypeKind::SSize || kind == TypeKind::Enum;
 }
 
 bool isUnsignedInteger(TypeKind kind) {

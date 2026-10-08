@@ -61,6 +61,9 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
   case TypeKind::Int16:
     return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int16_t *>(value)));
 
+  case TypeKind::Enum:
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int32_t *>(value)));
+
   case TypeKind::UInt16:
     return JSValueMakeNumber(context, static_cast<double>(*static_cast<const uint16_t *>(value)));
 
