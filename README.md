@@ -7,8 +7,6 @@ Compile C. Load native libraries (`.dll`, `.so`, `.dylib`). Call C functions. Wo
 
 Write your application in JavaScript or TypeScript, embed native C where you need it, and compile the whole thing into a standalone native executable or **optinally run it** as a runtime.
 
-Compatible with [node.js](https://nodejs.org/) platforms.
-
 Edon is a bridge between JavaScript and native C.
 
 #### Q2: What's the difference?
