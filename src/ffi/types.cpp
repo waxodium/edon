@@ -3,6 +3,8 @@
 
 #include <ffi.h>
 
+#include <algorithm>
+
 #include <limits>
 #include <new>
 #include <unordered_set>
@@ -59,6 +61,7 @@ ffi_type *primitiveFFIType(TypeKind kind) {
 
   case TypeKind::Function:
   case TypeKind::Struct:
+  case TypeKind::Union:
   case TypeKind::Array: return nullptr;
   }
 
@@ -149,6 +152,47 @@ bool prepareStruct(Type &type) {
   return true;
 }
 
+bool prepareUnion(Type &type) {
+  if (type.fields.empty()) return false;
+
+  std::size_t size = 0;
+  std::size_t alignment = 0;
+
+  for (Field &field : type.fields) {
+    if (!field.type) return false;
+
+    if (!prepareType(field.type)) return false;
+
+    if (!field.type->complete || field.type->size == 0 || field.type->alignment == 0) {
+      return false;
+    }
+
+    field.offset = 0;
+
+    if (field.type->size > size) size = field.type->size;
+    if (field.type->alignment > alignment) alignment = field.type->alignment;
+  }
+
+  if (size == 0 || alignment == 0) return false;
+
+  const std::size_t remainder = size % alignment;
+
+  if (remainder != 0) {
+    const std::size_t padding = alignment - remainder;
+
+    if (size > std::numeric_limits<std::size_t>::max() - padding) return false;
+
+    size += padding;
+  }
+
+  type.ffi = nullptr;
+  type.size = size;
+  type.alignment = alignment;
+  type.complete = true;
+
+  return true;
+}
+
 bool prepareArray(Type &type) {
   if (!type.element || type.count == 0) return false;
 
@@ -222,7 +266,7 @@ bool prepareEnum(Type &type) {
 bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   if (!type) return false;
 
-  if (type->complete && type->ffi) return true;
+  if (type->complete && (type->ffi || type->kind == TypeKind::Union)) return true;
 
   if (type->kind == TypeKind::Function && type->complete) return true;
 
@@ -247,6 +291,8 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
     case TypeKind::Function: result = prepareFunction(*type); break;
 
     case TypeKind::Struct: result = prepareStruct(*type); break;
+
+    case TypeKind::Union: result = prepareUnion(*type); break;
 
     case TypeKind::Array: result = prepareArray(*type); break;
 
@@ -306,6 +352,16 @@ std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fie
   auto type = std::make_shared<Type>();
 
   type->kind = TypeKind::Struct;
+  type->name = name;
+  type->fields = std::move(fields);
+
+  return type;
+}
+
+std::shared_ptr<Type> makeUnion(const std::string &name, std::vector<Field> fields) {
+  auto type = std::make_shared<Type>();
+
+  type->kind = TypeKind::Union;
   type->name = name;
   type->fields = std::move(fields);
 
@@ -419,6 +475,8 @@ const char *typeName(TypeKind kind) {
 
   case TypeKind::Struct: return "struct";
 
+  case TypeKind::Union: return "union";
+
   case TypeKind::Array: return "array";
 
   case TypeKind::Enum: return "enum";
@@ -451,6 +509,8 @@ bool isFloating(TypeKind kind) { return kind == TypeKind::Float || kind == TypeK
 
 bool isPointer(TypeKind kind) { return kind == TypeKind::Pointer; }
 
-bool isAggregate(TypeKind kind) { return kind == TypeKind::Struct || kind == TypeKind::Array; }
+bool isAggregate(TypeKind kind) {
+  return kind == TypeKind::Struct || kind == TypeKind::Union || kind == TypeKind::Array;
+}
 
 }} // namespace edon::ffi

@@ -28,9 +28,10 @@ enum class TypeKind {
   Double,
   Pointer,
   Struct,
+  Union,
+  Enum,
   Array,
-  Function,
-  Enum
+  Function
 };
 
 struct Type;
@@ -83,6 +84,8 @@ struct Type {
 std::shared_ptr<Type> makeType(TypeKind kind);
 
 std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fields);
+
+std::shared_ptr<Type> makeUnion(const std::string &name, std::vector<Field> fields);
 
 std::shared_ptr<Type> makeEnum(const std::string &name, std::vector<EnumValue> values);
 

@@ -812,6 +812,7 @@ bool convertArgument(JSContextRef context, JSValueRef value, const std::shared_p
     return convertArrayArgument(context, value, type, destination, error, stringStorage);
 
   case TypeKind::Function:
+  case TypeKind::Union:
   case TypeKind::Void: throwError(context, error, ErrorCode::UnsupportedArgumentType); return false;
   }
 
@@ -1112,6 +1113,10 @@ JSValueRef convertReturn(JSContextRef context, const std::shared_ptr<Type> &type
   case TypeKind::Struct: return convertStructReturn(context, type, value, error);
 
   case TypeKind::Array: return convertArrayReturn(context, type, value, error);
+
+  case TypeKind::Union:
+    throwError(context, error, ErrorCode::UnsupportedReturnType);
+    return JSValueMakeUndefined(context);
 
   case TypeKind::Function:
     throwError(context, error, ErrorCode::UnsupportedReturnType);

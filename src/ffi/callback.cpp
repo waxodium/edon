@@ -79,6 +79,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
   case TypeKind::UInt64:
     return JSBigIntCreateWithUInt64(context, *static_cast<const uint64_t *>(value), nullptr);
 
+  case TypeKind::Union: return nullptr;
+
   case TypeKind::Size:
     if (sizeof(std::size_t) == sizeof(uint64_t)) {
       return JSBigIntCreateWithUInt64(

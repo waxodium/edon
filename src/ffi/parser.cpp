@@ -43,6 +43,38 @@ bool TypeContext::defineStruct(const std::string &name, std::vector<Field> field
   return prepareType(type);
 }
 
+std::shared_ptr<Type> TypeContext::findUnion(const std::string &name) const {
+  const auto it = unions_.find(name);
+
+  if (it == unions_.end()) return nullptr;
+
+  return it->second;
+}
+
+std::shared_ptr<Type> TypeContext::getOrCreateUnion(const std::string &name) {
+  const auto it = unions_.find(name);
+
+  if (it != unions_.end()) return it->second;
+
+  auto type = makeUnion(name, {});
+
+  if (!type) return nullptr;
+
+  unions_.emplace(name, type);
+
+  return type;
+}
+
+bool TypeContext::defineUnion(const std::string &name, std::vector<Field> fields) {
+  auto type = getOrCreateUnion(name);
+
+  if (!type || type->complete) return false;
+
+  type->fields = std::move(fields);
+
+  return prepareType(type);
+}
+
 std::shared_ptr<Type> TypeContext::findEnum(const std::string &name) const {
   const auto it = enums_.find(name);
 
@@ -400,6 +432,18 @@ std::shared_ptr<Type> parseStructType(const std::string &name, TypeContext *cont
   if (structName.empty() || !context) { return nullptr; }
 
   return context->getOrCreateStruct(structName);
+}
+
+std::shared_ptr<Type> parseUnionType(const std::string &name, TypeContext *context) {
+  if (name.size() <= 5) return nullptr;
+
+  if (name.compare(0, 5, "union") != 0) return nullptr;
+
+  const std::string unionName = name.substr(5);
+
+  if (unionName.empty() || !context) return nullptr;
+
+  return context->getOrCreateUnion(unionName);
 }
 
 std::shared_ptr<Type> parseEnumType(const std::string &name, TypeContext *context) {
@@ -808,6 +852,8 @@ std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *conte
 
   if (!type) { type = parseStructType(baseName, context); }
 
+  if (!type) { type = parseUnionType(baseName, context); }
+
   if (!type) { type = parseEnumType(baseName, context); }
 
   if (!type) return nullptr;
@@ -1116,6 +1162,147 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
   return true;
 }
 
+bool parseUnionDefinition(const std::string &source, TypeContext *context, std::string &error) {
+  error.clear();
+
+  const std::string input = trim(source);
+
+  if (input.size() < 8 || input.compare(0, 5, "union") != 0) {
+    error = "invalid union definition";
+    return false;
+  }
+
+  if (!context) {
+    error = "missing type context";
+    return false;
+  }
+
+  std::size_t position = 5;
+
+  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
+    error = "invalid union keyword";
+    return false;
+  }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) {
+    error = "union definition requires a name";
+    return false;
+  }
+
+  const std::string name = input.substr(nameStart, position - nameStart);
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  if (position >= input.size() || input[position] != '{') {
+    error = "expected '{' after union name";
+    return false;
+  }
+
+  const std::size_t bodyStart = position + 1;
+
+  std::size_t depth = 1;
+  std::size_t bodyEnd = std::string::npos;
+
+  for (std::size_t i = bodyStart; i < input.size(); ++i) {
+    if (input[i] == '{') {
+      ++depth;
+      continue;
+    }
+
+    if (input[i] == '}') {
+      --depth;
+
+      if (depth == 0) {
+        bodyEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (bodyEnd == std::string::npos) {
+    error = "unterminated union definition";
+    return false;
+  }
+
+  if (!trim(input.substr(bodyEnd + 1)).empty()) {
+    error = "unexpected tokens after union definition";
+    return false;
+  }
+
+  const std::string body = input.substr(bodyStart, bodyEnd - bodyStart);
+
+  std::vector<std::string> fieldSources;
+
+  if (!splitStructFields(body, fieldSources)) {
+    error = "invalid union field list";
+    return false;
+  }
+
+  if (fieldSources.empty()) {
+    error = "union must contain at least one field";
+    return false;
+  }
+
+  auto unionType = context->getOrCreateUnion(name);
+
+  if (!unionType) {
+    error = "failed to create union: " + name;
+    return false;
+  }
+
+  if (unionType->complete) {
+    error = "union already defined: " + name;
+    return false;
+  }
+
+  std::vector<Field> fields;
+
+  try {
+    fields.reserve(fieldSources.size());
+  } catch (...) {
+    error = "union field allocation failed";
+    return false;
+  }
+
+  for (const std::string &fieldSource : fieldSources) {
+    Field field;
+
+    if (!parseFieldDeclaration(fieldSource, context, field, error)) {
+      error = "invalid union field: " + error;
+      return false;
+    }
+
+    for (const Field &existing : fields) {
+      if (existing.name == field.name) {
+        error = "duplicate union field: " + field.name;
+        return false;
+      }
+    }
+
+    fields.push_back(std::move(field));
+  }
+
+  if (!context->defineUnion(name, std::move(fields))) {
+    error = "failed to define union: " + name;
+    return false;
+  }
+
+  return true;
+}
+
 bool parseEnumDefinition(const std::string &source, TypeContext *context, std::string &error) {
   error.clear();
 
@@ -1408,6 +1595,37 @@ bool isStructDefinition(const std::string &source) {
   return position < input.size() && input[position] == '{';
 }
 
+bool isUnionDefinition(const std::string &source) {
+  const std::string input = trim(source);
+
+  if (input.size() < 5 || input.compare(0, 5, "union") != 0) { return false; }
+
+  std::size_t position = 5;
+
+  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
+    return false;
+  }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  const std::size_t nameStart = position;
+
+  while (position < input.size() &&
+         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+    ++position;
+  }
+
+  if (position == nameStart) { return false; }
+
+  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
+    ++position;
+  }
+
+  return position < input.size() && input[position] == '{';
+}
+
 bool isEnumDefinition(const std::string &source) {
   const std::string input = trim(source);
 
@@ -1532,6 +1750,12 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
       if (isStructDefinition(declaration)) {
         if (!parseStructDefinition(declaration, context.get(), error)) { return false; }
+
+        continue;
+      }
+
+      if (isUnionDefinition(declaration)) {
+        if (!parseUnionDefinition(declaration, context.get(), error)) { return false; }
 
         continue;
       }

@@ -24,6 +24,12 @@ public:
 
   bool defineEnum(const std::string &name, std::vector<EnumValue> values);
 
+  std::shared_ptr<Type> findUnion(const std::string &name) const;
+  std::shared_ptr<Type> getOrCreateUnion(const std::string &name);
+  bool defineUnion(const std::string &name, std::vector<Field> fields);
+
+  std::unordered_map<std::string, std::shared_ptr<Type>> unions_;
+
 private:
   std::unordered_map<std::string, std::shared_ptr<Type>> structs_;
   std::unordered_map<std::string, std::shared_ptr<Type>> enums_;
