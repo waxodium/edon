@@ -12,13 +12,19 @@
 #include <vector>
 
 namespace edon { namespace ffi {
-TypeContext::Checkpoint TypeContext::checkpoint() const {
-  Checkpoint result{structs_, unions_, enums_, typedefs_, {}};
 
-  std::unordered_set<const Type *> seen;
+TypeContext::Checkpoint TypeContext::checkpoint() const {
+  Checkpoint result;
+  result.structs = structs_;
+  result.unions = unions_;
+  result.enums = enums_;
+  result.typedefs = typedefs_;
+
+  std::unordered_set<const Type *> seenTypes;
+  std::unordered_set<const Signature *> seenSignatures;
 
   const auto snapshotType = [&](const auto &self, const std::shared_ptr<Type> &type) -> void {
-    if (!type || !seen.insert(type.get()).second) { return; }
+    if (!type || !seenTypes.insert(type.get()).second) { return; }
 
     result.types.push_back(Checkpoint::TypeSnapshot{type, type->fields, type->enumValues,
                                                     type->size, type->alignment, type->complete,
@@ -29,11 +35,16 @@ TypeContext::Checkpoint TypeContext::checkpoint() const {
     self(self, type->element);
 
     if (type->functionSignature) {
-      const Signature &signature = *type->functionSignature;
+      const auto &signature = type->functionSignature;
 
-      self(self, signature.returns);
+      if (seenSignatures.insert(signature.get()).second) {
+        result.signatures.push_back(Checkpoint::SignatureSnapshot{
+            signature, signature->cif, signature->ffiArgs, signature->prepared});
+      }
 
-      for (const auto &argument : signature.args) { self(self, argument); }
+      self(self, signature->returns);
+
+      for (const auto &argument : signature->args) { self(self, argument); }
     }
   };
 
@@ -53,6 +64,14 @@ TypeContext::Checkpoint TypeContext::checkpoint() const {
 }
 
 void TypeContext::rollback(Checkpoint checkpoint) {
+  for (auto &snapshot : checkpoint.signatures) {
+    if (!snapshot.signature) { continue; }
+
+    snapshot.signature->cif = snapshot.cif;
+    snapshot.signature->ffiArgs = std::move(snapshot.ffiArgs);
+    snapshot.signature->prepared = snapshot.prepared;
+  }
+
   for (auto &snapshot : checkpoint.types) {
     if (!snapshot.type) { continue; }
 

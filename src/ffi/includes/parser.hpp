@@ -24,11 +24,20 @@ public:
       ffi_type *ffi = nullptr;
     };
 
+    struct SignatureSnapshot {
+      std::shared_ptr<Signature> signature;
+      ffi_cif cif{};
+      std::vector<ffi_type *> ffiArgs;
+      bool prepared = false;
+    };
+
     std::unordered_map<std::string, std::shared_ptr<Type>> structs;
     std::unordered_map<std::string, std::shared_ptr<Type>> unions;
     std::unordered_map<std::string, std::shared_ptr<Type>> enums;
     std::unordered_map<std::string, std::shared_ptr<Type>> typedefs;
+
     std::vector<TypeSnapshot> types;
+    std::vector<SignatureSnapshot> signatures;
   };
 
   Checkpoint checkpoint() const;
