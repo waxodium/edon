@@ -1,15 +1,82 @@
 #include "parser.hpp"
 #include "signature.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace edon { namespace ffi {
+TypeContext::Checkpoint TypeContext::checkpoint() const {
+  Checkpoint result{structs_, unions_, enums_, typedefs_, {}};
+
+  std::unordered_set<const Type *> seen;
+
+  const auto snapshotType = [&](const auto &self, const std::shared_ptr<Type> &type) -> void {
+    if (!type || !seen.insert(type.get()).second) { return; }
+
+    result.types.push_back(Checkpoint::TypeSnapshot{type, type->fields, type->enumValues,
+                                                    type->size, type->alignment, type->complete,
+                                                    type->ffi});
+
+    for (const Field &field : type->fields) { self(self, field.type); }
+
+    self(self, type->element);
+
+    if (type->functionSignature) {
+      const Signature &signature = *type->functionSignature;
+
+      self(self, signature.returns);
+
+      for (const auto &argument : signature.args) { self(self, argument); }
+    }
+  };
+
+  const auto snapshotRegistry = [&](const auto &registry) {
+    for (const auto &[name, type] : registry) {
+      (void)name;
+      snapshotType(snapshotType, type);
+    }
+  };
+
+  snapshotRegistry(structs_);
+  snapshotRegistry(unions_);
+  snapshotRegistry(enums_);
+  snapshotRegistry(typedefs_);
+
+  return result;
+}
+
+void TypeContext::rollback(Checkpoint checkpoint) {
+  for (auto &snapshot : checkpoint.types) {
+    if (!snapshot.type) { continue; }
+
+    Type &type = *snapshot.type;
+
+    if (type.ffi != snapshot.ffi && type.ffi &&
+        (type.kind == TypeKind::Struct || type.kind == TypeKind::Array)) {
+      delete[] type.ffi->elements;
+      delete type.ffi;
+    }
+
+    type.fields = std::move(snapshot.fields);
+    type.enumValues = std::move(snapshot.enumValues);
+    type.size = snapshot.size;
+    type.alignment = snapshot.alignment;
+    type.complete = snapshot.complete;
+    type.ffi = snapshot.ffi;
+  }
+
+  structs_.swap(checkpoint.structs);
+  unions_.swap(checkpoint.unions);
+  enums_.swap(checkpoint.enums);
+  typedefs_.swap(checkpoint.typedefs);
+}
 
 std::shared_ptr<Type> TypeContext::findStruct(const std::string &name) const {
   const auto it = structs_.find(name);
@@ -38,9 +105,23 @@ bool TypeContext::defineStruct(const std::string &name, std::vector<Field> field
 
   if (!type || type->complete) return false;
 
-  type->fields = std::move(fields);
+  auto candidate = makeStruct(name, std::move(fields));
 
-  return prepareType(type);
+  if (!prepareType(candidate)) return false;
+
+  type->fields = std::move(candidate->fields);
+  type->size = candidate->size;
+  type->alignment = candidate->alignment;
+  type->complete = candidate->complete;
+  type->ffi = candidate->ffi;
+  candidate->ffi = nullptr;
+
+  return true;
+}
+
+void TypeContext::discardIncompleteStruct(const std::string &name) {
+  const auto it = structs_.find(name);
+  if (it != structs_.end() && it->second && !it->second->complete) structs_.erase(it);
 }
 
 std::shared_ptr<Type> TypeContext::findUnion(const std::string &name) const {
@@ -70,9 +151,23 @@ bool TypeContext::defineUnion(const std::string &name, std::vector<Field> fields
 
   if (!type || type->complete) return false;
 
-  type->fields = std::move(fields);
+  auto candidate = makeUnion(name, std::move(fields));
 
-  return prepareType(type);
+  if (!prepareType(candidate)) return false;
+
+  type->fields = std::move(candidate->fields);
+  type->size = candidate->size;
+  type->alignment = candidate->alignment;
+  type->complete = candidate->complete;
+  type->ffi = candidate->ffi;
+  candidate->ffi = nullptr;
+
+  return true;
+}
+
+void TypeContext::discardIncompleteUnion(const std::string &name) {
+  const auto it = unions_.find(name);
+  if (it != unions_.end() && it->second && !it->second->complete) unions_.erase(it);
 }
 
 std::shared_ptr<Type> TypeContext::findEnum(const std::string &name) const {
@@ -102,12 +197,78 @@ bool TypeContext::defineEnum(const std::string &name, std::vector<EnumValue> val
 
   if (!type || type->complete) return false;
 
-  type->enumValues = std::move(values);
+  auto candidate = makeEnum(name, std::move(values));
 
-  return prepareType(type);
+  if (!prepareType(candidate)) return false;
+
+  type->enumValues = std::move(candidate->enumValues);
+  type->size = candidate->size;
+  type->alignment = candidate->alignment;
+  type->complete = candidate->complete;
+  type->ffi = candidate->ffi;
+
+  return true;
+}
+
+void TypeContext::discardIncompleteEnum(const std::string &name) {
+  const auto it = enums_.find(name);
+  if (it != enums_.end() && it->second && !it->second->complete) enums_.erase(it);
+}
+
+std::shared_ptr<Type> TypeContext::findTypedef(const std::string &name) const {
+  const auto it = typedefs_.find(name);
+
+  if (it == typedefs_.end()) return nullptr;
+
+  return it->second;
+}
+
+bool TypeContext::defineTypedef(const std::string &name, std::shared_ptr<Type> type) {
+  std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases;
+  aliases.emplace_back(name, std::move(type));
+  return defineTypedefs(std::move(aliases));
+}
+
+bool TypeContext::defineTypedefs(
+    std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases) {
+  if (aliases.empty()) return false;
+
+  auto updated = typedefs_;
+
+  for (auto &alias : aliases) {
+    if (alias.first.empty() || !alias.second || updated.find(alias.first) != updated.end()) {
+      return false;
+    }
+
+    updated.emplace(alias.first, std::move(alias.second));
+  }
+
+  typedefs_.swap(updated);
+  return true;
 }
 
 namespace {
+
+class ContextTransaction {
+public:
+  explicit ContextTransaction(TypeContext *context)
+      : context_(context),
+        checkpoint_(context ? context->checkpoint() : TypeContext::Checkpoint{}) {}
+
+  ContextTransaction(const ContextTransaction &) = delete;
+  ContextTransaction &operator=(const ContextTransaction &) = delete;
+
+  ~ContextTransaction() {
+    if (context_ && !committed_) context_->rollback(std::move(checkpoint_));
+  }
+
+  void commit() { committed_ = true; }
+
+private:
+  TypeContext *context_;
+  TypeContext::Checkpoint checkpoint_;
+  bool committed_ = false;
+};
 
 struct Qualifiers {
   bool isConst = false;
@@ -449,13 +610,13 @@ std::shared_ptr<Type> parseUnionType(const std::string &name, TypeContext *conte
 std::shared_ptr<Type> parseEnumType(const std::string &name, TypeContext *context) {
   if (name.size() <= 4) return nullptr;
 
-  if (name.compare(0, 4, "enum") != 0) { return nullptr; }
+  if (name.compare(0, 4, "enum") != 0) return nullptr;
 
   const std::string enumName = name.substr(4);
 
-  if (enumName.empty() || !context) { return nullptr; }
+  if (enumName.empty() || !context) return nullptr;
 
-  return context->findEnum(enumName);
+  return context->getOrCreateEnum(enumName);
 }
 
 bool splitArguments(const std::string &source, std::vector<std::string> &arguments) {
@@ -573,6 +734,41 @@ bool splitFunction(const std::string &source, std::string &returnType, std::stri
 std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *context);
 
 std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context);
+
+std::shared_ptr<Type> cloneTypeForQualifiers(const std::shared_ptr<Type> &source) {
+  if (!source) return nullptr;
+
+  std::shared_ptr<Type> result;
+
+  switch (source->kind) {
+  case TypeKind::Pointer:
+    result = makeType(TypeKind::Pointer);
+    result->element = source->element;
+    break;
+  case TypeKind::Array: result = makeArray(source->element, source->count); break;
+  case TypeKind::Function:
+    result = makeType(TypeKind::Function);
+    result->functionSignature = source->functionSignature;
+    result->complete = source->complete;
+    break;
+  case TypeKind::Struct: result = makeStruct(source->name, source->fields); break;
+  case TypeKind::Union: result = makeUnion(source->name, source->fields); break;
+  case TypeKind::Enum: result = makeEnum(source->name, source->enumValues); break;
+  default: result = makeType(source->kind); break;
+  }
+
+  if (!result) return nullptr;
+
+  result->name = source->name;
+  result->size = source->size;
+  result->alignment = source->alignment;
+  result->complete = source->complete && isPrimitive(source->kind);
+  result->isConst = source->isConst;
+  result->isVolatile = source->isVolatile;
+  result->isRestrict = source->isRestrict;
+
+  return result;
+}
 
 class DeclaratorParser {
 public:
@@ -856,13 +1052,18 @@ std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *conte
 
   if (!type) { type = parseEnumType(baseName, context); }
 
+  if (!type && context) { type = context->findTypedef(baseName); }
+
   if (!type) return nullptr;
 
-  type->isConst = baseQualifiers.isConst;
+  if (baseQualifiers.isConst || baseQualifiers.isVolatile || baseQualifiers.isRestrict) {
+    type = cloneTypeForQualifiers(type);
+    if (!type) return nullptr;
 
-  type->isVolatile = baseQualifiers.isVolatile;
-
-  type->isRestrict = baseQualifiers.isRestrict;
+    type->isConst = baseQualifiers.isConst;
+    type->isVolatile = baseQualifiers.isVolatile;
+    type->isRestrict = baseQualifiers.isRestrict;
+  }
 
   if (declaratorSource.empty()) { return type; }
 
@@ -1054,10 +1255,18 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
 
   const std::string input = trim(source);
 
-  if (input.size() < 9 || input.compare(0, 6, "struct") != 0) {
+  if (input.size() < 9 || input.compare(0, 6, "struct") != 0 ||
+      !std::isspace(static_cast<unsigned char>(input[6]))) {
     error = "invalid struct definition";
     return false;
   }
+
+  if (!context) {
+    error = "missing type context";
+    return false;
+  }
+
+  ContextTransaction transaction(context);
 
   std::size_t position = 6;
 
@@ -1133,10 +1342,16 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     return false;
   }
 
+  const bool hadStructTag = static_cast<bool>(context->findStruct(name));
   auto structType = context->getOrCreateStruct(name);
 
   if (!structType) {
     error = "failed to create struct: " + name;
+    return false;
+  }
+
+  if (structType->complete) {
+    error = "struct already defined: " + name;
     return false;
   }
 
@@ -1146,19 +1361,37 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     fields.reserve(fieldSources.size());
   } catch (...) {
     error = "struct field allocation failed";
+    if (!hadStructTag) context->discardIncompleteStruct(name);
     return false;
   }
 
   for (const std::string &fieldSource : fieldSources) {
     Field field;
 
-    if (!parseFieldDeclaration(fieldSource, context, field, error)) { return false; }
+    if (!parseFieldDeclaration(fieldSource, context, field, error)) {
+      error = "invalid struct field: " + error;
+      if (!hadStructTag) context->discardIncompleteStruct(name);
+      return false;
+    }
+
+    for (const Field &existing : fields) {
+      if (existing.name == field.name) {
+        error = "duplicate struct field: " + field.name;
+        if (!hadStructTag) context->discardIncompleteStruct(name);
+        return false;
+      }
+    }
 
     fields.push_back(std::move(field));
   }
 
-  structType->fields = std::move(fields);
+  if (!context->defineStruct(name, std::move(fields))) {
+    error = "failed to define struct: " + name;
+    if (!hadStructTag) context->discardIncompleteStruct(name);
+    return false;
+  }
 
+  transaction.commit();
   return true;
 }
 
@@ -1176,6 +1409,8 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
     error = "missing type context";
     return false;
   }
+
+  ContextTransaction transaction(context);
 
   std::size_t position = 5;
 
@@ -1256,6 +1491,7 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
     return false;
   }
 
+  const bool hadUnionTag = static_cast<bool>(context->findUnion(name));
   auto unionType = context->getOrCreateUnion(name);
 
   if (!unionType) {
@@ -1274,6 +1510,7 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
     fields.reserve(fieldSources.size());
   } catch (...) {
     error = "union field allocation failed";
+    if (!hadUnionTag) context->discardIncompleteUnion(name);
     return false;
   }
 
@@ -1282,12 +1519,14 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
 
     if (!parseFieldDeclaration(fieldSource, context, field, error)) {
       error = "invalid union field: " + error;
+      if (!hadUnionTag) context->discardIncompleteUnion(name);
       return false;
     }
 
     for (const Field &existing : fields) {
       if (existing.name == field.name) {
         error = "duplicate union field: " + field.name;
+        if (!hadUnionTag) context->discardIncompleteUnion(name);
         return false;
       }
     }
@@ -1297,9 +1536,11 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
 
   if (!context->defineUnion(name, std::move(fields))) {
     error = "failed to define union: " + name;
+    if (!hadUnionTag) context->discardIncompleteUnion(name);
     return false;
   }
 
+  transaction.commit();
   return true;
 }
 
@@ -1307,6 +1548,13 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
   error.clear();
 
   const std::string input = trim(source);
+
+  if (!context) {
+    error = "missing type context";
+    return false;
+  }
+
+  ContextTransaction transaction(context);
 
   if (input.size() < 7 || input.compare(0, 4, "enum") != 0) {
     error = "invalid enum definition";
@@ -1332,6 +1580,12 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
   }
 
   const std::string name = input.substr(nameStart, position - nameStart);
+  const bool hadEnumTag = static_cast<bool>(context->findEnum(name));
+  const auto existingEnum = context->findEnum(name);
+  if (existingEnum && existingEnum->complete) {
+    error = "enum already defined: " + name;
+    return false;
+  }
 
   while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
     ++position;
@@ -1480,9 +1734,11 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
 
   if (!context->defineEnum(name, std::move(values))) {
     error = "failed to define enum: " + name;
+    if (!hadEnumTag) context->discardIncompleteEnum(name);
     return false;
   }
 
+  transaction.commit();
   return true;
 }
 
@@ -1657,6 +1913,245 @@ bool isEnumDefinition(const std::string &source) {
   return position < input.size() && input[position] == '{';
 }
 
+bool parseTypedefDeclaration(const std::string &source, TypeContext *context, std::string &error) {
+  error.clear();
+  const std::string input = trim(source);
+
+  if (input.size() < 7 || input.compare(0, 7, "typedef") != 0 ||
+      (input.size() > 7 && !std::isspace(static_cast<unsigned char>(input[7])))) {
+    error = "invalid typedef declaration";
+    return false;
+  }
+
+  if (!context) {
+    error = "missing type context";
+    return false;
+  }
+
+  ContextTransaction transaction(context);
+
+  const std::string body = trim(input.substr(7));
+  if (body.empty()) {
+    error = "typedef requires a type and name";
+    return false;
+  }
+
+  auto parseAliasDeclarators = [&](const std::string &sourceText,
+                                   std::vector<Declarator> &declarators,
+                                   std::vector<std::string> &names) -> bool {
+    std::vector<std::string> parts;
+    if (!splitArguments(sourceText, parts) || parts.empty()) {
+      error = "invalid typedef declarator list";
+      return false;
+    }
+
+    declarators.clear();
+    names.clear();
+    declarators.reserve(parts.size());
+    names.reserve(parts.size());
+
+    for (const std::string &part : parts) {
+      Declarator declarator;
+      DeclaratorParser parser(part, context);
+      if (!parser.parse(declarator)) {
+        error = "invalid typedef declarator: " + part;
+        return false;
+      }
+
+      const std::string name = declaratorName(declarator);
+      if (name.empty()) {
+        error = "typedef declarator requires a name";
+        return false;
+      }
+
+      for (const std::string &existing : names) {
+        if (existing == name) {
+          error = "duplicate typedef name: " + name;
+          return false;
+        }
+      }
+
+      if (context->findTypedef(name)) {
+        error = "duplicate typedef: " + name;
+        return false;
+      }
+
+      names.push_back(name);
+      declarators.push_back(std::move(declarator));
+    }
+
+    return true;
+  };
+
+  const std::size_t open = body.find('{');
+  if (open != std::string::npos) {
+    std::size_t depth = 0;
+    std::size_t close = std::string::npos;
+
+    for (std::size_t i = open; i < body.size(); ++i) {
+      if (body[i] == '{') {
+        ++depth;
+      } else if (body[i] == '}') {
+        if (depth == 0) break;
+        --depth;
+        if (depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+
+    if (close == std::string::npos) {
+      error = "unterminated typedef aggregate definition";
+      return false;
+    }
+
+    const std::string definition = trim(body.substr(0, close + 1));
+    const std::string aliasSource = trim(body.substr(close + 1));
+
+    if (isStructDefinition(definition) || isUnionDefinition(definition) ||
+        isEnumDefinition(definition)) {
+      std::vector<Declarator> declarators;
+      std::vector<std::string> names;
+      if (!parseAliasDeclarators(aliasSource, declarators, names)) return false;
+
+      const std::size_t keywordLength = isStructDefinition(definition)  ? 6U
+                                        : isUnionDefinition(definition) ? 5U
+                                                                        : 4U;
+      std::size_t nameStart = keywordLength;
+      while (nameStart < definition.size() &&
+             std::isspace(static_cast<unsigned char>(definition[nameStart]))) {
+        ++nameStart;
+      }
+      std::size_t nameEnd = nameStart;
+      while (nameEnd < definition.size() &&
+             (std::isalnum(static_cast<unsigned char>(definition[nameEnd])) ||
+              definition[nameEnd] == '_')) {
+        ++nameEnd;
+      }
+      if (nameEnd == nameStart) {
+        error = "aggregate typedef requires a tag name";
+        return false;
+      }
+      const std::string tagName = definition.substr(nameStart, nameEnd - nameStart);
+
+      std::shared_ptr<Type> aliasProbe;
+      if (isStructDefinition(definition)) {
+        aliasProbe = context->findStruct(tagName);
+        if (!aliasProbe) aliasProbe = makeStruct(tagName, {});
+      } else if (isUnionDefinition(definition)) {
+        aliasProbe = context->findUnion(tagName);
+        if (!aliasProbe) aliasProbe = makeUnion(tagName, {});
+      } else {
+        aliasProbe = context->findEnum(tagName);
+        if (!aliasProbe) aliasProbe = makeEnum(tagName, {});
+      }
+      if (!aliasProbe) {
+        error = "failed to prepare aggregate typedef: " + tagName;
+        return false;
+      }
+      for (std::size_t i = 0; i < declarators.size(); ++i) {
+        if (!applyDeclarator(aliasProbe, declarators[i])) {
+          error = "invalid typedef type: " + names[i];
+          return false;
+        }
+      }
+
+      std::shared_ptr<Type> aggregate;
+      if (isStructDefinition(definition)) {
+        auto existing = context->findStruct(tagName);
+        if (existing && existing->complete) {
+          error = "struct already defined: " + tagName;
+          return false;
+        }
+        if (!parseStructDefinition(definition, context, error)) return false;
+        aggregate = context->findStruct(tagName);
+      } else if (isUnionDefinition(definition)) {
+        auto existing = context->findUnion(tagName);
+        if (existing && existing->complete) {
+          error = "union already defined: " + tagName;
+          return false;
+        }
+        if (!parseUnionDefinition(definition, context, error)) return false;
+        aggregate = context->findUnion(tagName);
+      } else {
+        auto existing = context->findEnum(tagName);
+        if (existing && existing->complete) {
+          error = "enum already defined: " + tagName;
+          return false;
+        }
+        if (!parseEnumDefinition(definition, context, error)) return false;
+        aggregate = context->findEnum(tagName);
+      }
+
+      if (!aggregate) {
+        error = "failed to resolve aggregate typedef: " + tagName;
+        return false;
+      }
+
+      std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases;
+      aliases.reserve(declarators.size());
+      for (std::size_t i = 0; i < declarators.size(); ++i) {
+        auto aliasType = applyDeclarator(aggregate, declarators[i]);
+        if (!aliasType) {
+          error = "invalid typedef type: " + names[i];
+          return false;
+        }
+        aliases.emplace_back(names[i], std::move(aliasType));
+      }
+
+      if (!context->defineTypedefs(std::move(aliases))) {
+        error = "failed to register aggregate typedef aliases";
+        return false;
+      }
+      transaction.commit();
+      return true;
+    }
+  }
+
+  for (std::size_t i = body.size(); i > 0; --i) {
+    const std::size_t boundary = i - 1;
+    if (!std::isspace(static_cast<unsigned char>(body[boundary]))) continue;
+
+    const std::string typeSource = trim(body.substr(0, boundary));
+    const std::string declaratorSource = trim(body.substr(boundary + 1));
+    if (typeSource.empty() || declaratorSource.empty()) continue;
+
+    ContextTransaction candidateTransaction(context);
+    auto baseType = parseTypeName(typeSource, context);
+    if (!baseType) continue;
+
+    std::vector<Declarator> declarators;
+    std::vector<std::string> names;
+    error.clear();
+    if (!parseAliasDeclarators(declaratorSource, declarators, names)) continue;
+
+    std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases;
+    aliases.reserve(declarators.size());
+    bool valid = true;
+    for (std::size_t j = 0; j < declarators.size(); ++j) {
+      auto aliasType = applyDeclarator(baseType, declarators[j]);
+      if (!aliasType) {
+        valid = false;
+        break;
+      }
+      aliases.emplace_back(names[j], std::move(aliasType));
+    }
+
+    if (!valid) continue;
+    if (!context->defineTypedefs(std::move(aliases))) {
+      error = "failed to register typedef aliases";
+      return false;
+    }
+    candidateTransaction.commit();
+    transaction.commit();
+    return true;
+  }
+
+  error = "invalid typedef declaration: " + body;
+  return false;
+}
+
 } // namespace
 
 bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::string &error,
@@ -1748,6 +2243,12 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
       if (declaration.empty()) { continue; }
 
+      if (declaration.compare(0, 7, "typedef") == 0 &&
+          (declaration.size() == 7 || std::isspace(static_cast<unsigned char>(declaration[7])))) {
+        if (!parseTypedefDeclaration(declaration, context.get(), error)) return false;
+        continue;
+      }
+
       if (isStructDefinition(declaration)) {
         if (!parseStructDefinition(declaration, context.get(), error)) { return false; }
 
@@ -1764,6 +2265,45 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
         if (!parseEnumDefinition(declaration, context.get(), error)) { return false; }
 
         continue;
+      }
+
+      if (declaration.find('{') == std::string::npos &&
+          declaration.find('(') == std::string::npos) {
+        const std::size_t separator = declaration.find_first_of(" \t\r\n");
+        if (separator != std::string::npos) {
+          const std::string keyword = declaration.substr(0, separator);
+          const std::string tag = trim(declaration.substr(separator + 1));
+          const bool validTag =
+              !tag.empty() &&
+              (std::isalpha(static_cast<unsigned char>(tag.front())) || tag.front() == '_') &&
+              std::all_of(tag.begin() + 1, tag.end(), [](char character) {
+                return std::isalnum(static_cast<unsigned char>(character)) || character == '_';
+              });
+
+          if (validTag && keyword == "struct") {
+            if (!context->getOrCreateStruct(tag)) {
+              error = "failed to declare struct: " + tag;
+              return false;
+            }
+            continue;
+          }
+
+          if (validTag && keyword == "union") {
+            if (!context->getOrCreateUnion(tag)) {
+              error = "failed to declare union: " + tag;
+              return false;
+            }
+            continue;
+          }
+
+          if (validTag && keyword == "enum") {
+            if (!context->getOrCreateEnum(tag)) {
+              error = "failed to declare enum: " + tag;
+              return false;
+            }
+            continue;
+          }
+        }
       }
 
       if (declaration.find('(') == std::string::npos) { continue; }
