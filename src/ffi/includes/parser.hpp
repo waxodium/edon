@@ -35,7 +35,6 @@ public:
     std::unordered_map<std::string, std::shared_ptr<Type>> unions;
     std::unordered_map<std::string, std::shared_ptr<Type>> enums;
     std::unordered_map<std::string, std::shared_ptr<Type>> typedefs;
-
     std::vector<TypeSnapshot> types;
     std::vector<SignatureSnapshot> signatures;
   };

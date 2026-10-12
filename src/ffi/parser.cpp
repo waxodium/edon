@@ -13,6 +13,50 @@
 
 namespace edon { namespace ffi {
 
+namespace {
+
+template <class Registry>
+std::shared_ptr<Type> findNamedType(const Registry &registry, const std::string &name) {
+  const auto it = registry.find(name);
+  return it == registry.end() ? nullptr : it->second;
+}
+
+template <class Registry, class Factory>
+std::shared_ptr<Type> getOrCreateNamedType(Registry &registry, const std::string &name,
+                                           Factory factory) {
+  if (auto type = findNamedType(registry, name)) { return type; }
+  auto type = factory(name);
+  if (type) { registry.emplace(name, type); }
+  return type;
+}
+
+template <class Registry, class Values, class Factory>
+bool defineNamedType(Registry &registry, const std::string &name, Values values, Factory factory) {
+  auto type = getOrCreateNamedType(registry, name,
+                                   [&](const std::string &tag) { return factory(tag, Values{}); });
+  if (!type || type->complete) { return false; }
+
+  auto candidate = factory(name, std::move(values));
+  if (!candidate || !prepareType(candidate)) { return false; }
+
+  type->fields = std::move(candidate->fields);
+  type->enumValues = std::move(candidate->enumValues);
+  type->size = candidate->size;
+  type->alignment = candidate->alignment;
+  type->complete = candidate->complete;
+  type->ffi = candidate->ffi;
+  candidate->ffi = nullptr;
+  return true;
+}
+
+template <class Registry>
+void discardIncompleteNamedType(Registry &registry, const std::string &name) {
+  const auto it = registry.find(name);
+  if (it != registry.end() && it->second && !it->second->complete) { registry.erase(it); }
+}
+
+} // namespace
+
 TypeContext::Checkpoint TypeContext::checkpoint() const {
   Checkpoint result;
   result.structs = structs_;
@@ -98,148 +142,67 @@ void TypeContext::rollback(Checkpoint checkpoint) {
 }
 
 std::shared_ptr<Type> TypeContext::findStruct(const std::string &name) const {
-  const auto it = structs_.find(name);
-
-  if (it == structs_.end()) return nullptr;
-
-  return it->second;
+  return findNamedType(structs_, name);
 }
 
 std::shared_ptr<Type> TypeContext::getOrCreateStruct(const std::string &name) {
-  const auto it = structs_.find(name);
-
-  if (it != structs_.end()) return it->second;
-
-  auto type = makeStruct(name, {});
-
-  if (!type) return nullptr;
-
-  structs_.emplace(name, type);
-
-  return type;
+  return getOrCreateNamedType(structs_, name,
+                              [](const std::string &tag) { return makeStruct(tag, {}); });
 }
 
 bool TypeContext::defineStruct(const std::string &name, std::vector<Field> fields) {
-  auto type = getOrCreateStruct(name);
-
-  if (!type || type->complete) return false;
-
-  auto candidate = makeStruct(name, std::move(fields));
-
-  if (!prepareType(candidate)) return false;
-
-  type->fields = std::move(candidate->fields);
-  type->size = candidate->size;
-  type->alignment = candidate->alignment;
-  type->complete = candidate->complete;
-  type->ffi = candidate->ffi;
-  candidate->ffi = nullptr;
-
-  return true;
+  return defineNamedType(structs_, name, std::move(fields),
+                         [](const std::string &tag, std::vector<Field> value) {
+                           return makeStruct(tag, std::move(value));
+                         });
 }
 
 void TypeContext::discardIncompleteStruct(const std::string &name) {
-  const auto it = structs_.find(name);
-  if (it != structs_.end() && it->second && !it->second->complete) structs_.erase(it);
+  discardIncompleteNamedType(structs_, name);
 }
 
 std::shared_ptr<Type> TypeContext::findUnion(const std::string &name) const {
-  const auto it = unions_.find(name);
-
-  if (it == unions_.end()) return nullptr;
-
-  return it->second;
+  return findNamedType(unions_, name);
 }
 
 std::shared_ptr<Type> TypeContext::getOrCreateUnion(const std::string &name) {
-  const auto it = unions_.find(name);
-
-  if (it != unions_.end()) return it->second;
-
-  auto type = makeUnion(name, {});
-
-  if (!type) return nullptr;
-
-  unions_.emplace(name, type);
-
-  return type;
+  return getOrCreateNamedType(unions_, name,
+                              [](const std::string &tag) { return makeUnion(tag, {}); });
 }
 
 bool TypeContext::defineUnion(const std::string &name, std::vector<Field> fields) {
-  auto type = getOrCreateUnion(name);
-
-  if (!type || type->complete) return false;
-
-  auto candidate = makeUnion(name, std::move(fields));
-
-  if (!prepareType(candidate)) return false;
-
-  type->fields = std::move(candidate->fields);
-  type->size = candidate->size;
-  type->alignment = candidate->alignment;
-  type->complete = candidate->complete;
-  type->ffi = candidate->ffi;
-  candidate->ffi = nullptr;
-
-  return true;
+  return defineNamedType(unions_, name, std::move(fields),
+                         [](const std::string &tag, std::vector<Field> value) {
+                           return makeUnion(tag, std::move(value));
+                         });
 }
 
 void TypeContext::discardIncompleteUnion(const std::string &name) {
-  const auto it = unions_.find(name);
-  if (it != unions_.end() && it->second && !it->second->complete) unions_.erase(it);
+  discardIncompleteNamedType(unions_, name);
 }
 
 std::shared_ptr<Type> TypeContext::findEnum(const std::string &name) const {
-  const auto it = enums_.find(name);
-
-  if (it == enums_.end()) return nullptr;
-
-  return it->second;
+  return findNamedType(enums_, name);
 }
 
 std::shared_ptr<Type> TypeContext::getOrCreateEnum(const std::string &name) {
-  const auto it = enums_.find(name);
-
-  if (it != enums_.end()) return it->second;
-
-  auto type = makeEnum(name, {});
-
-  if (!type) return nullptr;
-
-  enums_.emplace(name, type);
-
-  return type;
+  return getOrCreateNamedType(enums_, name,
+                              [](const std::string &tag) { return makeEnum(tag, {}); });
 }
 
 bool TypeContext::defineEnum(const std::string &name, std::vector<EnumValue> values) {
-  auto type = getOrCreateEnum(name);
-
-  if (!type || type->complete) return false;
-
-  auto candidate = makeEnum(name, std::move(values));
-
-  if (!prepareType(candidate)) return false;
-
-  type->enumValues = std::move(candidate->enumValues);
-  type->size = candidate->size;
-  type->alignment = candidate->alignment;
-  type->complete = candidate->complete;
-  type->ffi = candidate->ffi;
-
-  return true;
+  return defineNamedType(enums_, name, std::move(values),
+                         [](const std::string &tag, std::vector<EnumValue> value) {
+                           return makeEnum(tag, std::move(value));
+                         });
 }
 
 void TypeContext::discardIncompleteEnum(const std::string &name) {
-  const auto it = enums_.find(name);
-  if (it != enums_.end() && it->second && !it->second->complete) enums_.erase(it);
+  discardIncompleteNamedType(enums_, name);
 }
 
 std::shared_ptr<Type> TypeContext::findTypedef(const std::string &name) const {
-  const auto it = typedefs_.find(name);
-
-  if (it == typedefs_.end()) return nullptr;
-
-  return it->second;
+  return findNamedType(typedefs_, name);
 }
 
 bool TypeContext::defineTypedef(const std::string &name, std::shared_ptr<Type> type) {
@@ -250,7 +213,7 @@ bool TypeContext::defineTypedef(const std::string &name, std::shared_ptr<Type> t
 
 bool TypeContext::defineTypedefs(
     std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases) {
-  if (aliases.empty()) return false;
+  if (aliases.empty()) { return false; }
 
   auto updated = typedefs_;
 
@@ -278,7 +241,7 @@ public:
   ContextTransaction &operator=(const ContextTransaction &) = delete;
 
   ~ContextTransaction() {
-    if (context_ && !committed_) context_->rollback(std::move(checkpoint_));
+    if (context_ && !committed_) { context_->rollback(std::move(checkpoint_)); }
   }
 
   void commit() { committed_ = true; }
@@ -299,14 +262,13 @@ struct DeclaratorOp {
   enum class Kind { Pointer, Array, Function };
 
   Kind kind = Kind::Pointer;
-
   std::size_t count = 0;
-
   bool isConst = false;
   bool isVolatile = false;
   bool isRestrict = false;
-
-  std::vector<std::shared_ptr<Type>> arguments;
+  std::vector<std::string> parameters;
+  bool emptyParameterList = false;
+  bool voidParameterList = false;
   bool variadic = false;
 };
 
@@ -314,7 +276,6 @@ struct Declarator {
   std::vector<DeclaratorOp> pointers;
   std::vector<DeclaratorOp> suffixes;
   std::shared_ptr<Declarator> nested;
-
   std::string name;
 };
 
@@ -454,7 +415,6 @@ std::string removePreprocessorDirectives(const std::string &source) {
       if (character == '#') {
         directive = true;
         directiveContinuation = false;
-
         result.push_back('\n');
         continue;
       }
@@ -494,7 +454,6 @@ std::string removePreprocessorDirectives(const std::string &source) {
 
 std::string removeWhitespace(const std::string &value) {
   std::string result;
-
   result.reserve(value.size());
 
   for (char character : value) {
@@ -510,7 +469,6 @@ bool consumeQualifier(const std::string &source, std::size_t &position, const ch
   if (source.compare(position, length, qualifier) != 0) { return false; }
 
   position += length;
-
   return true;
 }
 
@@ -541,18 +499,12 @@ Qualifiers parseQualifiers(const std::string &source, std::size_t &position) {
 
 std::shared_ptr<Type> parseBaseType(const std::string &name) {
   if (name == "void") return makeType(TypeKind::Void);
+  if (name == "bool" || name == "_Bool") return makeType(TypeKind::Bool);
+  if (name == "char" || name == "signedchar") return makeType(TypeKind::Char);
+  if (name == "unsignedchar") return makeType(TypeKind::UInt8);
 
-  if (name == "bool" || name == "_Bool") { return makeType(TypeKind::Bool); }
-
-  if (name == "char") return makeType(TypeKind::Char);
-
-  if (name == "signedchar") { return makeType(TypeKind::Char); }
-
-  if (name == "unsignedchar") { return makeType(TypeKind::UInt8); }
-
-  if (name == "int8" || name == "int8_t") { return makeType(TypeKind::Int8); }
-
-  if (name == "uint8" || name == "uint8_t") { return makeType(TypeKind::UInt8); }
+  if (name == "int8" || name == "int8_t") return makeType(TypeKind::Int8);
+  if (name == "uint8" || name == "uint8_t") return makeType(TypeKind::UInt8);
 
   if (name == "short" || name == "shortint" || name == "signedshort" || name == "signedshortint") {
     return makeType(TypeKind::Int16);
@@ -566,13 +518,10 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
 
   if (name == "unsigned" || name == "unsignedint") { return makeType(TypeKind::UInt32); }
 
-  if (name == "int16" || name == "int16_t") { return makeType(TypeKind::Int16); }
-
-  if (name == "uint16" || name == "uint16_t") { return makeType(TypeKind::UInt16); }
-
-  if (name == "int32" || name == "int32_t") { return makeType(TypeKind::Int32); }
-
-  if (name == "uint32" || name == "uint32_t") { return makeType(TypeKind::UInt32); }
+  if (name == "int16" || name == "int16_t") return makeType(TypeKind::Int16);
+  if (name == "uint16" || name == "uint16_t") return makeType(TypeKind::UInt16);
+  if (name == "int32" || name == "int32_t") return makeType(TypeKind::Int32);
+  if (name == "uint32" || name == "uint32_t") return makeType(TypeKind::UInt32);
 
   if (name == "longlong" || name == "longlongint" || name == "signedlonglong" ||
       name == "signedlonglongint") {
@@ -583,65 +532,43 @@ std::shared_ptr<Type> parseBaseType(const std::string &name) {
     return makeType(TypeKind::UInt64);
   }
 
-  if (name == "long") { return makeType(TypeKind::Int64); }
-
-  if (name == "unsignedlong") { return makeType(TypeKind::UInt64); }
-
-  if (name == "int64" || name == "int64_t") { return makeType(TypeKind::Int64); }
-
-  if (name == "uint64" || name == "uint64_t") { return makeType(TypeKind::UInt64); }
-
-  if (name == "size" || name == "size_t") { return makeType(TypeKind::Size); }
-
-  if (name == "ssize" || name == "ssize_t") { return makeType(TypeKind::SSize); }
-
-  if (name == "float") { return makeType(TypeKind::Float); }
-
-  if (name == "double") { return makeType(TypeKind::Double); }
+  if (name == "long") return makeType(TypeKind::Int64);
+  if (name == "unsignedlong") return makeType(TypeKind::UInt64);
+  if (name == "int64" || name == "int64_t") return makeType(TypeKind::Int64);
+  if (name == "uint64" || name == "uint64_t") return makeType(TypeKind::UInt64);
+  if (name == "size" || name == "size_t") return makeType(TypeKind::Size);
+  if (name == "ssize" || name == "ssize_t") return makeType(TypeKind::SSize);
+  if (name == "float") return makeType(TypeKind::Float);
+  if (name == "double") return makeType(TypeKind::Double);
 
   return nullptr;
 }
 
 std::shared_ptr<Type> parseStructType(const std::string &name, TypeContext *context) {
-  if (name.size() <= 6) return nullptr;
-
-  if (name.compare(0, 6, "struct") != 0) { return nullptr; }
+  if (name.size() <= 6 || name.compare(0, 6, "struct") != 0 || !context) { return nullptr; }
 
   const std::string structName = name.substr(6);
-
-  if (structName.empty() || !context) { return nullptr; }
-
-  return context->getOrCreateStruct(structName);
+  return structName.empty() ? nullptr : context->getOrCreateStruct(structName);
 }
 
 std::shared_ptr<Type> parseUnionType(const std::string &name, TypeContext *context) {
-  if (name.size() <= 5) return nullptr;
-
-  if (name.compare(0, 5, "union") != 0) return nullptr;
+  if (name.size() <= 5 || name.compare(0, 5, "union") != 0 || !context) { return nullptr; }
 
   const std::string unionName = name.substr(5);
-
-  if (unionName.empty() || !context) return nullptr;
-
-  return context->getOrCreateUnion(unionName);
+  return unionName.empty() ? nullptr : context->getOrCreateUnion(unionName);
 }
 
 std::shared_ptr<Type> parseEnumType(const std::string &name, TypeContext *context) {
-  if (name.size() <= 4) return nullptr;
-
-  if (name.compare(0, 4, "enum") != 0) return nullptr;
+  if (name.size() <= 4 || name.compare(0, 4, "enum") != 0 || !context) { return nullptr; }
 
   const std::string enumName = name.substr(4);
-
-  if (enumName.empty() || !context) return nullptr;
-
-  return context->getOrCreateEnum(enumName);
+  return enumName.empty() ? nullptr : context->getOrCreateEnum(enumName);
 }
 
 bool splitArguments(const std::string &source, std::vector<std::string> &arguments) {
   arguments.clear();
 
-  if (source.empty()) return true;
+  if (source.empty()) { return true; }
 
   std::size_t start = 0;
   std::size_t parentheses = 0;
@@ -657,7 +584,6 @@ bool splitArguments(const std::string &source, std::vector<std::string> &argumen
 
     if (character == ')') {
       if (parentheses == 0) return false;
-
       --parentheses;
       continue;
     }
@@ -669,17 +595,13 @@ bool splitArguments(const std::string &source, std::vector<std::string> &argumen
 
     if (character == ']') {
       if (brackets == 0) return false;
-
       --brackets;
       continue;
     }
 
-    if (character != ',') continue;
-
-    if (parentheses != 0 || brackets != 0) continue;
+    if (character != ',' || parentheses != 0 || brackets != 0) { continue; }
 
     const std::string argument = trim(source.substr(start, i - start));
-
     if (argument.empty()) return false;
 
     arguments.push_back(argument);
@@ -689,18 +611,15 @@ bool splitArguments(const std::string &source, std::vector<std::string> &argumen
   if (parentheses != 0 || brackets != 0) { return false; }
 
   const std::string argument = trim(source.substr(start));
-
   if (argument.empty()) return false;
 
   arguments.push_back(argument);
-
   return true;
 }
 
 bool splitFunction(const std::string &source, std::string &returnType, std::string &name,
                    std::string &arguments) {
   const std::size_t open = source.find('(');
-
   if (open == std::string::npos) return false;
 
   std::size_t depth = 0;
@@ -736,22 +655,18 @@ bool splitFunction(const std::string &source, std::string &returnType, std::stri
   }
 
   const std::string prefix = trim(source.substr(0, open));
-
   arguments = trim(source.substr(open + 1, close - open - 1));
 
   const std::size_t separator = prefix.find_last_of(" \t\r\n");
-
   if (separator == std::string::npos) return false;
 
   returnType = trim(prefix.substr(0, separator));
-
   name = trim(prefix.substr(separator + 1));
 
   return !returnType.empty() && !name.empty();
 }
 
 std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *context);
-
 std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context);
 
 std::shared_ptr<Type> cloneTypeForQualifiers(const std::shared_ptr<Type> &source) {
@@ -764,15 +679,21 @@ std::shared_ptr<Type> cloneTypeForQualifiers(const std::shared_ptr<Type> &source
     result = makeType(TypeKind::Pointer);
     result->element = source->element;
     break;
+
   case TypeKind::Array: result = makeArray(source->element, source->count); break;
+
   case TypeKind::Function:
     result = makeType(TypeKind::Function);
     result->functionSignature = source->functionSignature;
     result->complete = source->complete;
     break;
+
   case TypeKind::Struct: result = makeStruct(source->name, source->fields); break;
+
   case TypeKind::Union: result = makeUnion(source->name, source->fields); break;
+
   case TypeKind::Enum: result = makeEnum(source->name, source->enumValues); break;
+
   default: result = makeType(source->kind); break;
   }
 
@@ -791,29 +712,22 @@ std::shared_ptr<Type> cloneTypeForQualifiers(const std::shared_ptr<Type> &source
 
 class DeclaratorParser {
 public:
-  DeclaratorParser(const std::string &source, TypeContext *context)
-      : source_(source),
-        context_(context) {}
+  explicit DeclaratorParser(const std::string &source) : source_(source) {}
 
   bool parse(Declarator &declarator) {
     position_ = 0;
-
-    if (!parseDeclarator(declarator)) { return false; }
-
-    return position_ == source_.size();
+    return parseDeclarator(declarator) && position_ == source_.size();
   }
 
 private:
   bool parseIdentifier(std::string &name) {
-    if (position_ >= source_.size()) { return false; }
+    if (position_ >= source_.size()) return false;
 
     const unsigned char first = static_cast<unsigned char>(source_[position_]);
 
     if (!std::isalpha(first) && source_[position_] != '_') { return false; }
 
-    const std::size_t start = position_;
-
-    ++position_;
+    const std::size_t start = position_++;
 
     while (position_ < source_.size()) {
       const unsigned char character = static_cast<unsigned char>(source_[position_]);
@@ -824,18 +738,15 @@ private:
     }
 
     name = source_.substr(start, position_ - start);
-
     return true;
   }
 
   bool parseDeclarator(Declarator &declarator) {
     while (consume('*')) {
       DeclaratorOp pointer;
-
       pointer.kind = DeclaratorOp::Kind::Pointer;
 
       const Qualifiers qualifiers = parseQualifiers(source_, position_);
-
       pointer.isConst = qualifiers.isConst;
       pointer.isVolatile = qualifiers.isVolatile;
       pointer.isRestrict = qualifiers.isRestrict;
@@ -848,9 +759,7 @@ private:
 
       auto nested = std::make_shared<Declarator>();
 
-      if (!parseDeclarator(*nested)) { return false; }
-
-      if (!consume(')')) return false;
+      if (!parseDeclarator(*nested) || !consume(')')) { return false; }
 
       declarator.nested = std::move(nested);
     } else if (position_ < source_.size() &&
@@ -867,9 +776,7 @@ private:
       if (source_[position_] == '[') {
         ++position_;
 
-        if (position_ >= source_.size()) { return false; }
-
-        if (source_[position_] == ']') { return false; }
+        if (position_ >= source_.size() || source_[position_] == ']') { return false; }
 
         std::size_t count = 0;
 
@@ -883,20 +790,15 @@ private:
           if (count > (std::numeric_limits<std::size_t>::max() - digit) / 10) { return false; }
 
           count = count * 10 + digit;
-
           ++position_;
         }
 
-        if (!consume(']')) { return false; }
+        if (!consume(']')) return false;
 
         DeclaratorOp array;
-
         array.kind = DeclaratorOp::Kind::Array;
-
         array.count = count;
-
         suffixes.push_back(std::move(array));
-
         continue;
       }
 
@@ -904,7 +806,6 @@ private:
         ++position_;
 
         const std::size_t start = position_;
-
         std::size_t depth = 1;
 
         while (position_ < source_.size() && depth != 0) {
@@ -922,41 +823,36 @@ private:
         if (depth != 0) return false;
 
         const std::string argumentSource = source_.substr(start, position_ - start);
-
         ++position_;
 
         DeclaratorOp function;
-
         function.kind = DeclaratorOp::Kind::Function;
 
-        std::vector<std::string> arguments;
+        std::vector<std::string> parameters;
 
-        if (!splitArguments(argumentSource, arguments)) { return false; }
+        if (!splitArguments(argumentSource, parameters)) { return false; }
 
-        if (arguments.size() == 1 && arguments[0] == "void") {
+        function.emptyParameterList = argumentSource.empty();
+
+        if (parameters.size() == 1 && parameters[0] == "void") {
+          function.voidParameterList = true;
           suffixes.push_back(std::move(function));
           continue;
         }
 
-        for (std::size_t i = 0; i < arguments.size(); ++i) {
-          const std::string argumentSourceItem = trim(arguments[i]);
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+          const std::string parameter = trim(parameters[i]);
 
-          if (argumentSourceItem == "...") {
-            if (i + 1 != arguments.size()) { return false; }
-
+          if (parameter == "...") {
+            if (i + 1 != parameters.size() || i == 0) return false;
             function.variadic = true;
             continue;
           }
 
-          std::shared_ptr<Type> argument = parseParameterType(argumentSourceItem, context_);
-
-          if (!argument) return false;
-
-          function.arguments.push_back(std::move(argument));
+          function.parameters.push_back(parameter);
         }
 
         suffixes.push_back(std::move(function));
-
         continue;
       }
 
@@ -970,51 +866,46 @@ private:
     if (position_ >= source_.size() || source_[position_] != character) { return false; }
 
     ++position_;
-
     return true;
   }
 
   const std::string &source_;
-  TypeContext *context_ = nullptr;
   std::size_t position_ = 0;
 };
 
 std::shared_ptr<Type> makePointer(std::shared_ptr<Type> element, const DeclaratorOp &operation) {
   auto pointer = makeType(TypeKind::Pointer);
-
   pointer->element = std::move(element);
-
   pointer->isConst = operation.isConst;
-
   pointer->isVolatile = operation.isVolatile;
-
   pointer->isRestrict = operation.isRestrict;
-
   return pointer;
 }
 
 std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
-                                    const std::vector<DeclaratorOp> &suffixes) {
+                                    const std::vector<DeclaratorOp> &suffixes,
+                                    TypeContext *context) {
   for (const DeclaratorOp &operation : suffixes) {
     if (operation.kind == DeclaratorOp::Kind::Array) {
       type = makeArray(std::move(type), operation.count);
-
       continue;
     }
 
     if (operation.kind == DeclaratorOp::Kind::Function) {
       auto function = makeType(TypeKind::Function);
-
       auto signature = std::make_shared<Signature>();
 
       signature->returns = std::move(type);
 
-      signature->args = operation.arguments;
+      for (const std::string &parameter : operation.parameters) {
+        auto argument = parseParameterType(parameter, context);
+        if (!argument) return nullptr;
+        signature->args.push_back(std::move(argument));
+      }
 
       signature->variadic = operation.variadic;
 
       function->functionSignature = std::move(signature);
-
       type = std::move(function);
     }
   }
@@ -1022,10 +913,15 @@ std::shared_ptr<Type> applySuffixes(std::shared_ptr<Type> type,
   return type;
 }
 
-std::shared_ptr<Type> applyDeclarator(std::shared_ptr<Type> type, const Declarator &declarator) {
-  type = applySuffixes(std::move(type), declarator.suffixes);
+std::shared_ptr<Type> applyDeclarator(std::shared_ptr<Type> type, const Declarator &declarator,
+                                      TypeContext *context) {
+  type = applySuffixes(std::move(type), declarator.suffixes, context);
+  if (!type) return nullptr;
 
-  if (declarator.nested) { type = applyDeclarator(std::move(type), *declarator.nested); }
+  if (declarator.nested) {
+    type = applyDeclarator(std::move(type), *declarator.nested, context);
+    if (!type) return nullptr;
+  }
 
   for (auto it = declarator.pointers.rbegin(); it != declarator.pointers.rend(); ++it) {
     type = makePointer(std::move(type), *it);
@@ -1035,43 +931,33 @@ std::shared_ptr<Type> applyDeclarator(std::shared_ptr<Type> type, const Declarat
 }
 
 std::string declaratorName(const Declarator &declarator) {
-  if (!declarator.name.empty()) { return declarator.name; }
-
-  if (declarator.nested) { return declaratorName(*declarator.nested); }
-
+  if (!declarator.name.empty()) return declarator.name;
+  if (declarator.nested) return declaratorName(*declarator.nested);
   return {};
 }
 
 std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *context) {
   std::string source = removeWhitespace(input);
-
   if (source.empty()) return nullptr;
 
   std::size_t qualifierPosition = 0;
-
   const Qualifiers baseQualifiers = parseQualifiers(source, qualifierPosition);
-
   source.erase(0, qualifierPosition);
 
   if (source.empty()) return nullptr;
 
   const std::size_t declaratorStart = source.find_first_of("*([");
-
   const std::string baseName =
       declaratorStart == std::string::npos ? source : source.substr(0, declaratorStart);
-
   const std::string declaratorSource =
       declaratorStart == std::string::npos ? std::string() : source.substr(declaratorStart);
 
   std::shared_ptr<Type> type = parseBaseType(baseName);
 
-  if (!type) { type = parseStructType(baseName, context); }
-
-  if (!type) { type = parseUnionType(baseName, context); }
-
-  if (!type) { type = parseEnumType(baseName, context); }
-
-  if (!type && context) { type = context->findTypedef(baseName); }
+  if (!type) type = parseStructType(baseName, context);
+  if (!type) type = parseUnionType(baseName, context);
+  if (!type) type = parseEnumType(baseName, context);
+  if (!type && context) type = context->findTypedef(baseName);
 
   if (!type) return nullptr;
 
@@ -1084,24 +970,21 @@ std::shared_ptr<Type> parseTypeName(const std::string &input, TypeContext *conte
     type->isRestrict = baseQualifiers.isRestrict;
   }
 
-  if (declaratorSource.empty()) { return type; }
+  if (declaratorSource.empty()) return type;
 
   Declarator declarator;
+  DeclaratorParser parser(declaratorSource);
 
-  DeclaratorParser parser(declaratorSource, context);
+  if (!parser.parse(declarator)) return nullptr;
 
-  if (!parser.parse(declarator)) { return nullptr; }
-
-  return applyDeclarator(std::move(type), declarator);
+  return applyDeclarator(std::move(type), declarator, context);
 }
 
 std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *context) {
   const std::string candidate = trim(input);
+  if (candidate.empty()) return nullptr;
 
-  if (candidate.empty()) { return nullptr; }
-
-  std::shared_ptr<Type> type = parseTypeName(candidate, context);
-
+  auto type = parseTypeName(candidate, context);
   if (type) return type;
 
   std::size_t split = candidate.size();
@@ -1121,11 +1004,10 @@ std::shared_ptr<Type> parseParameterType(const std::string &input, TypeContext *
     break;
   }
 
-  if (split == nameEnd) { return nullptr; }
+  if (split == nameEnd) return nullptr;
 
   const std::string candidateType = trim(candidate.substr(0, split));
-
-  if (candidateType.empty()) { return nullptr; }
+  if (candidateType.empty()) return nullptr;
 
   return parseTypeName(candidateType, context);
 }
@@ -1170,7 +1052,6 @@ bool parseFieldDeclaration(const std::string &source, TypeContext *context, Fiel
   }
 
   const std::size_t suffixStart = nameEnd;
-
   std::size_t nameStart = nameEnd;
 
   while (nameStart > 0) {
@@ -1190,14 +1071,11 @@ bool parseFieldDeclaration(const std::string &source, TypeContext *context, Fiel
   }
 
   const std::string name = input.substr(nameStart, nameEnd - nameStart);
-
   std::string typeSource = trim(input.substr(0, nameStart));
-
   const std::string suffix = input.substr(suffixStart);
 
   if (!suffix.empty()) {
-    if (!typeSource.empty()) { typeSource += " "; }
-
+    if (!typeSource.empty()) typeSource += ' ';
     typeSource += suffix;
   }
 
@@ -1209,7 +1087,6 @@ bool parseFieldDeclaration(const std::string &source, TypeContext *context, Fiel
   }
 
   field.name = name;
-
   field.type = std::move(type);
 
   return true;
@@ -1231,8 +1108,7 @@ bool splitStructFields(const std::string &source, std::vector<std::string> &fiel
     }
 
     if (character == ')') {
-      if (parentheses == 0) { return false; }
-
+      if (parentheses == 0) return false;
       --parentheses;
       continue;
     }
@@ -1243,30 +1119,23 @@ bool splitStructFields(const std::string &source, std::vector<std::string> &fiel
     }
 
     if (character == ']') {
-      if (brackets == 0) { return false; }
-
+      if (brackets == 0) return false;
       --brackets;
       continue;
     }
 
-    if (character != ';') { continue; }
-
-    if (parentheses != 0 || brackets != 0) { continue; }
+    if (character != ';' || parentheses != 0 || brackets != 0) { continue; }
 
     const std::string field = trim(source.substr(start, i - start));
-
-    if (field.empty()) { return false; }
+    if (field.empty()) return false;
 
     fields.push_back(field);
-
     start = i + 1;
   }
 
-  if (parentheses != 0 || brackets != 0) { return false; }
+  if (parentheses != 0 || brackets != 0) return false;
 
-  const std::string trailing = trim(source.substr(start));
-
-  return trailing.empty();
+  return trim(source.substr(start)).empty();
 }
 
 bool parseStructDefinition(const std::string &source, TypeContext *context, std::string &error) {
@@ -1317,17 +1186,13 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
   }
 
   const std::size_t bodyStart = position + 1;
-
   std::size_t depth = 1;
   std::size_t bodyEnd = std::string::npos;
 
   for (std::size_t i = bodyStart; i < input.size(); ++i) {
     if (input[i] == '{') {
       ++depth;
-      continue;
-    }
-
-    if (input[i] == '}') {
+    } else if (input[i] == '}') {
       --depth;
 
       if (depth == 0) {
@@ -1347,11 +1212,9 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     return false;
   }
 
-  const std::string body = input.substr(bodyStart, bodyEnd - bodyStart);
-
   std::vector<std::string> fieldSources;
 
-  if (!splitStructFields(body, fieldSources)) {
+  if (!splitStructFields(input.substr(bodyStart, bodyEnd - bodyStart), fieldSources)) {
     error = "invalid struct field list";
     return false;
   }
@@ -1380,7 +1243,9 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
     fields.reserve(fieldSources.size());
   } catch (...) {
     error = "struct field allocation failed";
-    if (!hadStructTag) context->discardIncompleteStruct(name);
+
+    if (!hadStructTag) { context->discardIncompleteStruct(name); }
+
     return false;
   }
 
@@ -1389,14 +1254,18 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
 
     if (!parseFieldDeclaration(fieldSource, context, field, error)) {
       error = "invalid struct field: " + error;
-      if (!hadStructTag) context->discardIncompleteStruct(name);
+
+      if (!hadStructTag) { context->discardIncompleteStruct(name); }
+
       return false;
     }
 
     for (const Field &existing : fields) {
       if (existing.name == field.name) {
         error = "duplicate struct field: " + field.name;
-        if (!hadStructTag) context->discardIncompleteStruct(name);
+
+        if (!hadStructTag) { context->discardIncompleteStruct(name); }
+
         return false;
       }
     }
@@ -1406,7 +1275,9 @@ bool parseStructDefinition(const std::string &source, TypeContext *context, std:
 
   if (!context->defineStruct(name, std::move(fields))) {
     error = "failed to define struct: " + name;
-    if (!hadStructTag) context->discardIncompleteStruct(name);
+
+    if (!hadStructTag) { context->discardIncompleteStruct(name); }
+
     return false;
   }
 
@@ -1466,17 +1337,13 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
   }
 
   const std::size_t bodyStart = position + 1;
-
   std::size_t depth = 1;
   std::size_t bodyEnd = std::string::npos;
 
   for (std::size_t i = bodyStart; i < input.size(); ++i) {
     if (input[i] == '{') {
       ++depth;
-      continue;
-    }
-
-    if (input[i] == '}') {
+    } else if (input[i] == '}') {
       --depth;
 
       if (depth == 0) {
@@ -1496,11 +1363,9 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
     return false;
   }
 
-  const std::string body = input.substr(bodyStart, bodyEnd - bodyStart);
-
   std::vector<std::string> fieldSources;
 
-  if (!splitStructFields(body, fieldSources)) {
+  if (!splitStructFields(input.substr(bodyStart, bodyEnd - bodyStart), fieldSources)) {
     error = "invalid union field list";
     return false;
   }
@@ -1529,7 +1394,9 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
     fields.reserve(fieldSources.size());
   } catch (...) {
     error = "union field allocation failed";
-    if (!hadUnionTag) context->discardIncompleteUnion(name);
+
+    if (!hadUnionTag) { context->discardIncompleteUnion(name); }
+
     return false;
   }
 
@@ -1538,14 +1405,18 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
 
     if (!parseFieldDeclaration(fieldSource, context, field, error)) {
       error = "invalid union field: " + error;
-      if (!hadUnionTag) context->discardIncompleteUnion(name);
+
+      if (!hadUnionTag) { context->discardIncompleteUnion(name); }
+
       return false;
     }
 
     for (const Field &existing : fields) {
       if (existing.name == field.name) {
         error = "duplicate union field: " + field.name;
-        if (!hadUnionTag) context->discardIncompleteUnion(name);
+
+        if (!hadUnionTag) { context->discardIncompleteUnion(name); }
+
         return false;
       }
     }
@@ -1555,7 +1426,9 @@ bool parseUnionDefinition(const std::string &source, TypeContext *context, std::
 
   if (!context->defineUnion(name, std::move(fields))) {
     error = "failed to define union: " + name;
-    if (!hadUnionTag) context->discardIncompleteUnion(name);
+
+    if (!hadUnionTag) { context->discardIncompleteUnion(name); }
+
     return false;
   }
 
@@ -1601,6 +1474,7 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
   const std::string name = input.substr(nameStart, position - nameStart);
   const bool hadEnumTag = static_cast<bool>(context->findEnum(name));
   const auto existingEnum = context->findEnum(name);
+
   if (existingEnum && existingEnum->complete) {
     error = "enum already defined: " + name;
     return false;
@@ -1616,17 +1490,13 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
   }
 
   const std::size_t bodyStart = position + 1;
-
   std::size_t depth = 1;
   std::size_t bodyEnd = std::string::npos;
 
   for (std::size_t i = bodyStart; i < input.size(); ++i) {
     if (input[i] == '{') {
       ++depth;
-      continue;
-    }
-
-    if (input[i] == '}') {
+    } else if (input[i] == '}') {
       --depth;
 
       if (depth == 0) {
@@ -1654,7 +1524,6 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
   }
 
   std::vector<EnumValue> values;
-
   std::size_t start = 0;
   std::int64_t nextValue = 0;
 
@@ -1670,7 +1539,6 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
     }
 
     const std::size_t equal = item.find('=');
-
     std::string valueName;
     std::string valueExpression;
 
@@ -1678,7 +1546,6 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
       valueName = trim(item);
     } else {
       valueName = trim(item.substr(0, equal));
-
       valueExpression = trim(item.substr(equal + 1));
 
       if (valueExpression.empty()) {
@@ -1729,8 +1596,8 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
       }
     }
 
-    if (value > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()) ||
-        value < static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())) {
+    if (value > std::numeric_limits<std::int32_t>::max() ||
+        value < std::numeric_limits<std::int32_t>::min()) {
       error = "enum value outside int32 range: " + valueName;
       return false;
     }
@@ -1753,7 +1620,9 @@ bool parseEnumDefinition(const std::string &source, TypeContext *context, std::s
 
   if (!context->defineEnum(name, std::move(values))) {
     error = "failed to define enum: " + name;
-    if (!hadEnumTag) context->discardIncompleteEnum(name);
+
+    if (!hadEnumTag) { context->discardIncompleteEnum(name); }
+
     return false;
   }
 
@@ -1782,7 +1651,7 @@ bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction 
     return false;
   }
 
-  std::shared_ptr<Type> parsedReturn = parseTypeName(returnType, context);
+  auto parsedReturn = parseTypeName(returnType, context);
 
   if (!parsedReturn) {
     error = "unsupported return type: " + returnType;
@@ -1790,7 +1659,6 @@ bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction 
   }
 
   Signature signature;
-
   signature.returns = std::move(parsedReturn);
 
   std::vector<std::string> arguments;
@@ -1822,7 +1690,7 @@ bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction 
       return false;
     }
 
-    std::shared_ptr<Type> argument = parseParameterType(candidate, context);
+    auto argument = parseParameterType(candidate, context);
 
     if (!argument) {
       error = "unsupported function argument: " + candidate;
@@ -1833,21 +1701,36 @@ bool parseFunctionDeclarationInternal(const std::string &source, ParsedFunction 
   }
 
   function.name = std::move(name);
-
   function.signature = std::move(signature);
 
   return true;
 }
 
-bool isStructDefinition(const std::string &source) {
+enum class AggregateKind { None, Struct, Union, Enum };
+
+AggregateKind classifyAggregateDefinition(const std::string &source) {
   const std::string input = trim(source);
 
-  if (input.size() < 6 || input.compare(0, 6, "struct") != 0) { return false; }
+  AggregateKind kind = AggregateKind::None;
+  std::size_t keywordLength = 0;
 
-  std::size_t position = 6;
+  if (input.compare(0, 6, "struct") == 0) {
+    kind = AggregateKind::Struct;
+    keywordLength = 6;
+  } else if (input.compare(0, 5, "union") == 0) {
+    kind = AggregateKind::Union;
+    keywordLength = 5;
+  } else if (input.compare(0, 4, "enum") == 0) {
+    kind = AggregateKind::Enum;
+    keywordLength = 4;
+  } else {
+    return AggregateKind::None;
+  }
 
-  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
-    return false;
+  std::size_t position = keywordLength;
+
+  if (position >= input.size() || !std::isspace(static_cast<unsigned char>(input[position]))) {
+    return AggregateKind::None;
   }
 
   while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
@@ -1856,84 +1739,29 @@ bool isStructDefinition(const std::string &source) {
 
   const std::size_t nameStart = position;
 
-  while (position < input.size() &&
-         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
+  while (position < input.size()) {
+    const unsigned char character = static_cast<unsigned char>(input[position]);
+
+    if (!std::isalnum(character) && character != '_') { break; }
+
     ++position;
   }
 
-  if (position == nameStart) { return false; }
-
-  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
-    ++position;
-  }
-
-  return position < input.size() && input[position] == '{';
-}
-
-bool isUnionDefinition(const std::string &source) {
-  const std::string input = trim(source);
-
-  if (input.size() < 5 || input.compare(0, 5, "union") != 0) { return false; }
-
-  std::size_t position = 5;
-
-  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
-    return false;
+  if (position == nameStart ||
+      (!std::isalpha(static_cast<unsigned char>(input[nameStart])) && input[nameStart] != '_')) {
+    return AggregateKind::None;
   }
 
   while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
     ++position;
   }
 
-  const std::size_t nameStart = position;
-
-  while (position < input.size() &&
-         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
-    ++position;
-  }
-
-  if (position == nameStart) { return false; }
-
-  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
-    ++position;
-  }
-
-  return position < input.size() && input[position] == '{';
-}
-
-bool isEnumDefinition(const std::string &source) {
-  const std::string input = trim(source);
-
-  if (input.size() < 4 || input.compare(0, 4, "enum") != 0) { return false; }
-
-  std::size_t position = 4;
-
-  if (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position]))) {
-    return false;
-  }
-
-  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
-    ++position;
-  }
-
-  const std::size_t nameStart = position;
-
-  while (position < input.size() &&
-         (std::isalnum(static_cast<unsigned char>(input[position])) || input[position] == '_')) {
-    ++position;
-  }
-
-  if (position == nameStart) { return false; }
-
-  while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) {
-    ++position;
-  }
-
-  return position < input.size() && input[position] == '{';
+  return position < input.size() && input[position] == '{' ? kind : AggregateKind::None;
 }
 
 bool parseTypedefDeclaration(const std::string &source, TypeContext *context, std::string &error) {
   error.clear();
+
   const std::string input = trim(source);
 
   if (input.size() < 7 || input.compare(0, 7, "typedef") != 0 ||
@@ -1950,6 +1778,7 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
   ContextTransaction transaction(context);
 
   const std::string body = trim(input.substr(7));
+
   if (body.empty()) {
     error = "typedef requires a type and name";
     return false;
@@ -1959,6 +1788,7 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
                                    std::vector<Declarator> &declarators,
                                    std::vector<std::string> &names) -> bool {
     std::vector<std::string> parts;
+
     if (!splitArguments(sourceText, parts) || parts.empty()) {
       error = "invalid typedef declarator list";
       return false;
@@ -1971,13 +1801,15 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
 
     for (const std::string &part : parts) {
       Declarator declarator;
-      DeclaratorParser parser(part, context);
+      DeclaratorParser parser(part);
+
       if (!parser.parse(declarator)) {
         error = "invalid typedef declarator: " + part;
         return false;
       }
 
       const std::string name = declaratorName(declarator);
+
       if (name.empty()) {
         error = "typedef declarator requires a name";
         return false;
@@ -2003,6 +1835,7 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
   };
 
   const std::size_t open = body.find('{');
+
   if (open != std::string::npos) {
     std::size_t depth = 0;
     std::size_t close = std::string::npos;
@@ -2011,8 +1844,10 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
       if (body[i] == '{') {
         ++depth;
       } else if (body[i] == '}') {
-        if (depth == 0) break;
+        if (depth == 0) { break; }
+
         --depth;
+
         if (depth == 0) {
           close = i;
           break;
@@ -2027,80 +1862,124 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
 
     const std::string definition = trim(body.substr(0, close + 1));
     const std::string aliasSource = trim(body.substr(close + 1));
+    const AggregateKind kind = classifyAggregateDefinition(definition);
 
-    if (isStructDefinition(definition) || isUnionDefinition(definition) ||
-        isEnumDefinition(definition)) {
+    if (kind != AggregateKind::None) {
       std::vector<Declarator> declarators;
       std::vector<std::string> names;
-      if (!parseAliasDeclarators(aliasSource, declarators, names)) return false;
 
-      const std::size_t keywordLength = isStructDefinition(definition)  ? 6U
-                                        : isUnionDefinition(definition) ? 5U
-                                                                        : 4U;
+      if (!parseAliasDeclarators(aliasSource, declarators, names)) { return false; }
+
+      std::size_t keywordLength = 0;
+
+      switch (kind) {
+      case AggregateKind::Struct: keywordLength = 6; break;
+      case AggregateKind::Union: keywordLength = 5; break;
+      case AggregateKind::Enum: keywordLength = 4; break;
+      case AggregateKind::None: return false;
+      }
+
       std::size_t nameStart = keywordLength;
+
       while (nameStart < definition.size() &&
              std::isspace(static_cast<unsigned char>(definition[nameStart]))) {
         ++nameStart;
       }
+
       std::size_t nameEnd = nameStart;
+
       while (nameEnd < definition.size() &&
              (std::isalnum(static_cast<unsigned char>(definition[nameEnd])) ||
               definition[nameEnd] == '_')) {
         ++nameEnd;
       }
+
       if (nameEnd == nameStart) {
         error = "aggregate typedef requires a tag name";
         return false;
       }
+
       const std::string tagName = definition.substr(nameStart, nameEnd - nameStart);
 
       std::shared_ptr<Type> aliasProbe;
-      if (isStructDefinition(definition)) {
+
+      switch (kind) {
+      case AggregateKind::Struct:
         aliasProbe = context->findStruct(tagName);
         if (!aliasProbe) aliasProbe = makeStruct(tagName, {});
-      } else if (isUnionDefinition(definition)) {
+        break;
+
+      case AggregateKind::Union:
         aliasProbe = context->findUnion(tagName);
         if (!aliasProbe) aliasProbe = makeUnion(tagName, {});
-      } else {
+        break;
+
+      case AggregateKind::Enum:
         aliasProbe = context->findEnum(tagName);
         if (!aliasProbe) aliasProbe = makeEnum(tagName, {});
+        break;
+
+      case AggregateKind::None: return false;
       }
+
       if (!aliasProbe) {
         error = "failed to prepare aggregate typedef: " + tagName;
         return false;
       }
+
       for (std::size_t i = 0; i < declarators.size(); ++i) {
-        if (!applyDeclarator(aliasProbe, declarators[i])) {
+        if (!applyDeclarator(aliasProbe, declarators[i], context)) {
           error = "invalid typedef type: " + names[i];
           return false;
         }
       }
 
       std::shared_ptr<Type> aggregate;
-      if (isStructDefinition(definition)) {
-        auto existing = context->findStruct(tagName);
+
+      switch (kind) {
+      case AggregateKind::Struct: {
+        const auto existing = context->findStruct(tagName);
+
         if (existing && existing->complete) {
           error = "struct already defined: " + tagName;
           return false;
         }
-        if (!parseStructDefinition(definition, context, error)) return false;
+
+        if (!parseStructDefinition(definition, context, error)) { return false; }
+
         aggregate = context->findStruct(tagName);
-      } else if (isUnionDefinition(definition)) {
-        auto existing = context->findUnion(tagName);
+        break;
+      }
+
+      case AggregateKind::Union: {
+        const auto existing = context->findUnion(tagName);
+
         if (existing && existing->complete) {
           error = "union already defined: " + tagName;
           return false;
         }
-        if (!parseUnionDefinition(definition, context, error)) return false;
+
+        if (!parseUnionDefinition(definition, context, error)) { return false; }
+
         aggregate = context->findUnion(tagName);
-      } else {
-        auto existing = context->findEnum(tagName);
+        break;
+      }
+
+      case AggregateKind::Enum: {
+        const auto existing = context->findEnum(tagName);
+
         if (existing && existing->complete) {
           error = "enum already defined: " + tagName;
           return false;
         }
-        if (!parseEnumDefinition(definition, context, error)) return false;
+
+        if (!parseEnumDefinition(definition, context, error)) { return false; }
+
         aggregate = context->findEnum(tagName);
+        break;
+      }
+
+      case AggregateKind::None: return false;
       }
 
       if (!aggregate) {
@@ -2110,12 +1989,15 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
 
       std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases;
       aliases.reserve(declarators.size());
+
       for (std::size_t i = 0; i < declarators.size(); ++i) {
-        auto aliasType = applyDeclarator(aggregate, declarators[i]);
+        auto aliasType = applyDeclarator(aggregate, declarators[i], context);
+
         if (!aliasType) {
           error = "invalid typedef type: " + names[i];
           return false;
         }
+
         aliases.emplace_back(names[i], std::move(aliasType));
       }
 
@@ -2123,6 +2005,7 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
         error = "failed to register aggregate typedef aliases";
         return false;
       }
+
       transaction.commit();
       return true;
     }
@@ -2130,38 +2013,49 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
 
   for (std::size_t i = body.size(); i > 0; --i) {
     const std::size_t boundary = i - 1;
-    if (!std::isspace(static_cast<unsigned char>(body[boundary]))) continue;
+
+    if (!std::isspace(static_cast<unsigned char>(body[boundary]))) { continue; }
 
     const std::string typeSource = trim(body.substr(0, boundary));
     const std::string declaratorSource = trim(body.substr(boundary + 1));
-    if (typeSource.empty() || declaratorSource.empty()) continue;
+
+    if (typeSource.empty() || declaratorSource.empty()) { continue; }
 
     ContextTransaction candidateTransaction(context);
+
     auto baseType = parseTypeName(typeSource, context);
     if (!baseType) continue;
 
     std::vector<Declarator> declarators;
     std::vector<std::string> names;
+
     error.clear();
-    if (!parseAliasDeclarators(declaratorSource, declarators, names)) continue;
+
+    if (!parseAliasDeclarators(declaratorSource, declarators, names)) { continue; }
 
     std::vector<std::pair<std::string, std::shared_ptr<Type>>> aliases;
     aliases.reserve(declarators.size());
+
     bool valid = true;
+
     for (std::size_t j = 0; j < declarators.size(); ++j) {
-      auto aliasType = applyDeclarator(baseType, declarators[j]);
+      auto aliasType = applyDeclarator(baseType, declarators[j], context);
+
       if (!aliasType) {
         valid = false;
         break;
       }
+
       aliases.emplace_back(names[j], std::move(aliasType));
     }
 
     if (!valid) continue;
+
     if (!context->defineTypedefs(std::move(aliases))) {
       error = "failed to register typedef aliases";
       return false;
     }
+
     candidateTransaction.commit();
     transaction.commit();
     return true;
@@ -2169,6 +2063,77 @@ bool parseTypedefDeclaration(const std::string &source, TypeContext *context, st
 
   error = "invalid typedef declaration: " + body;
   return false;
+}
+
+bool parseDeclaration(const std::string &declaration, TypeContext *context, ParsedCSource &result,
+                      std::string &error) {
+  if (declaration.empty()) { return true; }
+
+  if (declaration.compare(0, 7, "typedef") == 0 &&
+      (declaration.size() == 7 || std::isspace(static_cast<unsigned char>(declaration[7])))) {
+    return parseTypedefDeclaration(declaration, context, error);
+  }
+
+  switch (classifyAggregateDefinition(declaration)) {
+  case AggregateKind::Struct: return parseStructDefinition(declaration, context, error);
+  case AggregateKind::Union: return parseUnionDefinition(declaration, context, error);
+  case AggregateKind::Enum: return parseEnumDefinition(declaration, context, error);
+  case AggregateKind::None: break;
+  }
+
+  if (declaration.find('{') == std::string::npos && declaration.find('(') == std::string::npos) {
+    const std::size_t separator = declaration.find_first_of(" \t\r\n");
+
+    if (separator != std::string::npos) {
+      const std::string keyword = declaration.substr(0, separator);
+      const std::string tag = trim(declaration.substr(separator + 1));
+
+      const bool validTag =
+          !tag.empty() &&
+          (std::isalpha(static_cast<unsigned char>(tag.front())) || tag.front() == '_') &&
+          std::all_of(tag.begin() + 1, tag.end(), [](char character) {
+            return std::isalnum(static_cast<unsigned char>(character)) || character == '_';
+          });
+
+      if (validTag) {
+        if (keyword == "struct") {
+          if (!context->getOrCreateStruct(tag)) {
+            error = "failed to declare struct: " + tag;
+            return false;
+          }
+
+          return true;
+        }
+
+        if (keyword == "union") {
+          if (!context->getOrCreateUnion(tag)) {
+            error = "failed to declare union: " + tag;
+            return false;
+          }
+
+          return true;
+        }
+
+        if (keyword == "enum") {
+          if (!context->getOrCreateEnum(tag)) {
+            error = "failed to declare enum: " + tag;
+            return false;
+          }
+
+          return true;
+        }
+      }
+    }
+  }
+
+  if (declaration.find('(') == std::string::npos) { return true; }
+
+  ParsedFunction function;
+
+  if (!parseFunctionDeclarationInternal(declaration, function, error, context)) { return false; }
+
+  result.functions.push_back(std::move(function));
+  return true;
 }
 
 } // namespace
@@ -2202,7 +2167,6 @@ bool parseType(const std::string &source, std::shared_ptr<Type> &type, std::stri
 bool parseFunctionDeclaration(const std::string &source, ParsedFunction &function,
                               std::string &error) {
   TypeContext context;
-
   return parseFunctionDeclarationInternal(source, function, error, &context);
 }
 
@@ -2211,7 +2175,6 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
   error.clear();
 
   const std::string normalizedSource = removePreprocessorDirectives(source);
-
   auto context = std::make_shared<TypeContext>();
 
   std::size_t start = 0;
@@ -2220,7 +2183,6 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
 
   for (std::size_t i = 0; i <= normalizedSource.size(); ++i) {
     const bool end = i == normalizedSource.size();
-
     const char character = end ? ';' : normalizedSource[i];
 
     if (!end) {
@@ -2256,84 +2218,31 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
     }
 
     if (end || (character == ';' && parentheses == 0 && braces == 0)) {
-      const std::string declaration = trim(normalizedSource.substr(start, i - start));
+      const std::string rawDeclaration = normalizedSource.substr(start, i - start);
+      const std::string declaration = trim(rawDeclaration);
+      const std::size_t leading = rawDeclaration.find_first_not_of(" \t\r\n");
+      const std::size_t declarationStart = leading == std::string::npos ? i : start + leading;
 
       start = i + 1;
 
-      if (declaration.empty()) { continue; }
+      if (!parseDeclaration(declaration, context.get(), result, error)) {
+        std::size_t line = 1;
+        std::size_t column = 1;
+        const std::size_t location = declarationStart;
 
-      if (declaration.compare(0, 7, "typedef") == 0 &&
-          (declaration.size() == 7 || std::isspace(static_cast<unsigned char>(declaration[7])))) {
-        if (!parseTypedefDeclaration(declaration, context.get(), error)) return false;
-        continue;
-      }
-
-      if (isStructDefinition(declaration)) {
-        if (!parseStructDefinition(declaration, context.get(), error)) { return false; }
-
-        continue;
-      }
-
-      if (isUnionDefinition(declaration)) {
-        if (!parseUnionDefinition(declaration, context.get(), error)) { return false; }
-
-        continue;
-      }
-
-      if (isEnumDefinition(declaration)) {
-        if (!parseEnumDefinition(declaration, context.get(), error)) { return false; }
-
-        continue;
-      }
-
-      if (declaration.find('{') == std::string::npos &&
-          declaration.find('(') == std::string::npos) {
-        const std::size_t separator = declaration.find_first_of(" \t\r\n");
-        if (separator != std::string::npos) {
-          const std::string keyword = declaration.substr(0, separator);
-          const std::string tag = trim(declaration.substr(separator + 1));
-          const bool validTag =
-              !tag.empty() &&
-              (std::isalpha(static_cast<unsigned char>(tag.front())) || tag.front() == '_') &&
-              std::all_of(tag.begin() + 1, tag.end(), [](char character) {
-                return std::isalnum(static_cast<unsigned char>(character)) || character == '_';
-              });
-
-          if (validTag && keyword == "struct") {
-            if (!context->getOrCreateStruct(tag)) {
-              error = "failed to declare struct: " + tag;
-              return false;
-            }
-            continue;
-          }
-
-          if (validTag && keyword == "union") {
-            if (!context->getOrCreateUnion(tag)) {
-              error = "failed to declare union: " + tag;
-              return false;
-            }
-            continue;
-          }
-
-          if (validTag && keyword == "enum") {
-            if (!context->getOrCreateEnum(tag)) {
-              error = "failed to declare enum: " + tag;
-              return false;
-            }
-            continue;
+        for (std::size_t offset = 0; offset < location; ++offset) {
+          if (normalizedSource[offset] == '\n') {
+            ++line;
+            column = 1;
+          } else {
+            ++column;
           }
         }
-      }
 
-      if (declaration.find('(') == std::string::npos) { continue; }
-
-      ParsedFunction function;
-
-      if (!parseFunctionDeclarationInternal(declaration, function, error, context.get())) {
+        error = "line " + std::to_string(line) + ", column " + std::to_string(column) + ": " +
+                (error.empty() ? "invalid declaration" : error);
         return false;
       }
-
-      result.functions.push_back(std::move(function));
     }
   }
 
@@ -2348,7 +2257,6 @@ bool parseCSource(const std::string &source, ParsedCSource &result, std::string 
   }
 
   result.context = std::move(context);
-
   return true;
 }
 
