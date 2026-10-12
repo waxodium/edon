@@ -1,22 +1,35 @@
-# FFI
+# **edon:ffi**
 
-`edon:ffi` provides a foreign function interface for compiling C code at runtime, loading native libraries, calling C functions, creating JavaScript callbacks, and managing native memory.
+`edon:ffi` provides a foreign function interface for compiling C code at runtime, loading native libraries, calling C functions, creating JavaScript callbacks, and managing native memory. This API is intentionally unsafe. Misuse can cause crashes, memory corruption, or undefined behavior.
 
-## Table of Contents
+## **Table of Contents**
+
+- [Import](#import)
 - [Runtime C Compilation](#runtime-c-compilation)
+  - [`c(source)`](#csource)
 - [Native Libraries](#native-libraries)
-- [Native Functions](#native-functions)
-- [Callbacks](#callbacks)
+  - [`loadLibrary(path)`](#loadlibrarypath)
+- [Calling Native Code](#calling-native-code)
+  - [Native Functions](#native-functions)
+    - [`module.cfunction(name, signature)`](#modulecfunctionnamesignature)
+  - [Callbacks](#callbacks)
+    - [`createCallback(fn, signature)`](#createcallbackfnsignature)
+    - [`destroyCallback(callback)`](#destroycallbackcallback)
 - [Native Memory](#native-memory)
+  - [`allocateSharedBuffer(size)`](#allocatesharedbuffersize)
+  - [`addressOf(buffer)`](#addressofbuffer)
+  - [`free(buffer)`](#freebuffer)
 - [C Type Declarations](#c-type-declarations)
-  - [Pointers](#pointers)
-  - [Arrays](#arrays)
+  - [Primitive Types](#primitive-types)
+  - [Pointers, Arrays, and Aggregates](#pointers-arrays-and-aggregates)
   - [Function Pointers](#function-pointers)
-  - [Qualifiers](#qualifiers)
-- [Example](#example)
+  - [Qualifiers and Typedefs](#qualifiers-and-typedefs)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
 
-## Import
+---
 
+## **Import**
 ```js
 const {
   c,
@@ -29,9 +42,19 @@ const {
 } = require("edon:ffi");
 ```
 
-## Runtime C Compilation
+## **Runtime C Compilation**
 
-`c()` compiles C source code at runtime and returns a native module.
+### `c(source)`
+
+**Type:** Function
+
+Compiles C source code at runtime and returns a native module. TCC is the default compiler; alternative compilers may be selected through runtime configuration when supported.
+
+**Parameters**
+
+- `source` `<string>`: C source code to compile.
+
+**Returns:** A native module exposing compiled functions.
 
 ```js
 const native = c(`
@@ -41,30 +64,51 @@ const native = c(`
 `);
 ```
 
-Functions exported by the compiled module can be accessed through `cfunction()`.
+## **Native Libraries**
 
-## Native Libraries
+### `loadLibrary(path)`
 
-`loadLibrary()` loads a native shared library and returns a native module.
+**Type:** Function
 
-```js
-const libc = loadLibrary("libc.so.6");
-```
+Loads a precompiled native shared library and returns a native module.
 
-Library paths and formats depend on the host platform.
+**Parameters**
 
-## Native Functions
+- `path` `<string>`: Library path or name.
 
-`cfunction()` creates a JavaScript callable for a native function exported by a compiled module or loaded library.
-
-### Syntax
+**Returns:** A native module exposing the library's symbols.
 
 ```js
-module.cfunction(name, signature)
+const libc = loadLibrary("libc.so.6"); // Linux
 ```
 
-- `name`: function name.
-- `signature`: object describing the return type and argument types.
+| Supported Platform | Library Format | 
+|---|---|
+| Linux    | `"libc.so.6"` |
+| macOS    | `"libc.dylib"` |
+| Windows  | `"msvcrt.dll"` |
+
+## **Calling Native Code**
+
+### **Native Functions**
+
+#### `module.cfunction(name, signature)`
+
+**Type:** Method
+
+Creates a JavaScript callable for a native function exported by a compiled module or loaded library.
+
+**Parameters**
+
+- `name` `<string>`: Native function name.
+- `signature` `<Object>`: Function signature describing the return and argument types.
+
+**Signature properties**
+
+- `returns` `<string>`: Native return type.
+- `args` `<Array<string>>`: Argument types in declaration order.
+
+**Returns:** A JavaScript function that invokes the native function.
 
 ```js
 const add = native.cfunction("add", {
@@ -75,26 +119,37 @@ const add = native.cfunction("add", {
 console.log(add(2, 3)); // 5
 ```
 
-`returns` specifies the native return type. `args` lists argument types in declaration order. For `void` functions, the JavaScript call returns `undefined`.
+For `void` return types, the JavaScript call returns `undefined`.
 
-### Variadic Functions
-
-Variadic signatures use `"..."` as the final entry in `args`.
+**Variadic functions:** Use `"..."` as the final entry in `args`.
 
 ```js
 const printf = libc.cfunction("printf", {
-  returns: "int32",
+  returns: "int",
   args: ["const char*", "..."]
 });
 
-printf("value = %d\n", 42);
+printf("Value: %d\n", 42);
 ```
 
 Variadic arguments follow C's default argument-promotion rules.
 
-## Callbacks
+### **Callbacks**
 
-`createCallback()` creates a native function pointer backed by a JavaScript function.
+#### `createCallback(fn, signature)`
+
+**Type:** Function
+
+Creates a native function pointer backed by a JavaScript function. The pointer can be passed to native functions expecting a compatible callback signature.
+
+**Parameters**
+
+- `fn` `<Function>`: JavaScript function invoked when native code calls the callback. Arguments are converted to JavaScript values according to the signature.
+- `signature` `<Object>`: Configuration object describing the native callback signature.
+  - `returns` `<string>`: Native return type.
+  - `args` `<Array<string>>`: Native argument types in declaration order.
+
+**Returns:** A native callback handle that can be passed to compatible native functions.
 
 ```js
 const callback = createCallback(
@@ -106,110 +161,165 @@ const callback = createCallback(
 );
 ```
 
-The signature determines how arguments and return values are converted between JavaScript and native code. A callback can be passed to a native function that expects a compatible function pointer.
+The signature must match the native function pointer's expected types and calling convention.
 
-Use `destroyCallback()` when the callback is no longer needed.
+#### `destroyCallback(callback)`
+
+**Type:** Function
+
+Destroys a callback and releases its associated resources.
+
+**Parameters**
+
+- `callback` (callback handle): Callback previously created with `createCallback()`.
+
+**Returns:** No meaningful return value.
 
 ```js
 destroyCallback(callback);
 ```
 
-A destroyed callback must not be passed to native code.
+The callback must no longer be used by native code before it is destroyed. Using a destroyed callback can cause a crash or undefined behavior.
 
-## Native Memory
+## **Native Memory**
 
-`allocateSharedBuffer()` allocates native memory and returns an `ArrayBuffer`.
+### `allocateSharedBuffer(size)`
+
+**Type:** Function
+
+Allocates native memory and exposes it through a JavaScript `ArrayBuffer`.
+
+**Parameters**
+
+- `size` `<number>`: Number of bytes to allocate.
+
+**Returns:** `ArrayBuffer` backed by the native allocation.
 
 ```js
 const buffer = allocateSharedBuffer(64);
 const view = new DataView(buffer);
 
 view.setInt32(0, 123, true);
+```
 
+### `addressOf(buffer)`
+
+**Type:** Function
+
+Obtains the native memory address associated with an allocated buffer.
+
+**Parameters**
+
+- `buffer` `<ArrayBuffer>`: Buffer backed by an FFI-managed native allocation.
+
+**Returns:** The native address representation supported by the implementation.
+
+```js
 const address = addressOf(buffer);
+```
 
+### `free(buffer)`
+
+**Type:** Function
+
+Releases an FFI-managed native memory allocation.
+
+**Parameters**
+
+- `buffer` `<ArrayBuffer>`: Buffer whose native allocation should be released.
+
+**Returns:** No meaningful return value.
+
+```js
 free(buffer);
 ```
 
-- `allocateSharedBuffer(size)`: allocates native memory.
-- `addressOf(buffer)`: obtains the allocation's native address.
-- `free(buffer)`: releases the allocation.
+An allocation must only be freed once. Do not access its native memory after it has been freed.
 
-Native memory must not be accessed after it has been freed. An allocation must only be freed once.
+## **C Type Declarations**
 
-## C Type Declarations
+Type strings describe native values used by function signatures and callbacks. They must match the actual native ABI.
 
-`edon:ffi` uses C-style type declarations for native function signatures and callbacks.
+### **Primitive Types**
 
-### Primitive Types
+| Type | Description | JavaScript representation |
+|---|---|---|
+| `void` | No return value | `undefined` |
+| `bool` | Boolean | `boolean` |
+| `char` | C character type | Integer or character representation supported by the implementation |
+| `int8`, `uint8` | 8-bit integers | `number` |
+| `int16`, `uint16` | 16-bit integers | `number` |
+| `int32`, `uint32` | 32-bit integers | `number` |
+| `int64`, `uint64` | 64-bit integers | `bigint` or supported safe integer `number` |
+| `size`, `ssize` | Platform-sized integers | Numeric representation supported by the implementation |
+| `float` | Single-precision floating point | `number` |
+| `double` | Double-precision floating point | `number` |
 
-| Type | Description |
-|---|---|
-| `void` | No return value |
-| `bool` | Boolean |
-| `char` | Character |
-| `int8`, `uint8` | 8-bit integers |
-| `int16`, `uint16` | 16-bit integers |
-| `int32`, `uint32` | 32-bit integers |
-| `int64`, `uint64` | 64-bit integers |
-| `size`, `ssize` | Size types |
-| `float` | Single-precision floating point |
-| `double` | Double-precision floating point |
+C-style type spellings and fixed-width integer names may be accepted by the parser where supported.
 
-`int64` and `uint64` support JavaScript `BigInt` values. Safe integer `Number` values are also supported.
+### **Pointers, Arrays, and Aggregates**
 
-### Pointers
+#### **Pointers**
 
-Pointers use standard C declarator syntax.
+Pointers represent native memory addresses.
 
-```text
+```c
 void*
 int32*
 int32**
 const char*
-volatile int32*
-int32 *const
 ```
 
-Supported qualifiers include `const`, `volatile`, and `restrict`.
+Pointer values must be valid for the expected native operation and remain valid for the duration of use.
 
-### Arrays
+#### **Arrays**
 
-Fixed-size arrays use a type followed by an element count.
+Fixed-size arrays specify an element type and count.
 
-```text
+```c
 int32[4]
 double[8]
 uint8[256]
 ```
 
-Arrays support combinations with pointers and parenthesized declarators.
+Arrays can be combined with pointers and parenthesized declarators where supported.
 
-### Function Pointers
+#### **Structs, Unions, and Enums**
 
-Function pointers use standard C syntax, including parenthesized and nested declarators.
+The type system supports named `struct`, `union`, and `enum` declarations, along with typedef aliases, subject to the parser and ABI implementation.
 
-```text
-int (*)(int)
-int (*)(int, double)
-void (*)(const char*)
+```c
+typedef struct {
+  int x;
+  int y;
+} Point;
 ```
 
-Function pointers can be arguments or return types and can be combined with pointers, arrays, and variadic signatures.
+Aggregate layouts must match the native compiler's layout, including field alignment and padding.
 
-### Structs, Unions, and Enums
+### **Function Pointers**
 
-The type system supports C struct, union, and enum declarations, including named types and typedef aliases.
+Function pointer declarations use C-style syntax.
 
-### Typedefs
+```c
+int (*)(int)
+int (*)(int, double)
+void (*)(void*)
+```
 
-Typedef declarations and chained aliases are supported within the type context. Aliases can refer to supported primitive, pointer, array, aggregate, and function-pointer types.
+They can be used as native arguments or return types when the signature is supported.
 
-## Example
+### **Qualifiers and Typedefs**
+
+Supported qualifiers include `const`, `volatile`, and `restrict`.
+
+Typedef declarations and chained aliases can refer to supported primitive, pointer, array, aggregate, and function-pointer types.
+
+## **Examples**
+
+### **1. Calling a Compiled Function**
 
 ```js
-const { c } = require("edon:ffi");
-
 const native = c(`
   int multiply(int a, int b) {
     return a * b;
@@ -223,3 +333,54 @@ const multiply = native.cfunction("multiply", {
 
 console.log(multiply(6, 7)); // 42
 ```
+
+### **2. Passing a Callback to Native Code**
+
+```js
+const native = c(`
+  int apply(int (*fn)(int), int value) {
+    return fn(value);
+  }
+`);
+
+const apply = native.cfunction("apply", {
+  returns: "int32",
+  args: ["int (*)(int)", "int32"]
+});
+
+const callback = createCallback(value => value * 2, {
+  returns: "int32",
+  args: ["int32"]
+});
+
+console.log(apply(callback, 21)); // 42
+
+destroyCallback(callback);
+```
+
+### **3. Native Memory**
+
+```js
+const buffer = allocateSharedBuffer(64);
+const view = new DataView(buffer);
+
+view.setInt32(0, 123, true);
+
+console.log(view.getInt32(0, true)); // 123
+
+const address = addressOf(buffer);
+
+free(buffer);
+```
+
+## **Troubleshooting**
+Lists of common usage issues of `edon:ffi`: 
+
+| Issue | Recommendation |
+|---|---|
+| Segmentation fault | Check pointer validity, callback extent, and function signatures. |
+| Memory corruption | Verify native types, alignment, and buffer bounds. |
+| Memory leaks | Release allocations and destroy callbacks when no longer needed. |
+| Type mismatch | Verify that the declared signature matches the native function. |
+| Unsupported type | Use a supported declaration. Do not substitute an incompatible type. |
+
