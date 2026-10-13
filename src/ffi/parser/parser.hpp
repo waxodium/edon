@@ -1,7 +1,7 @@
 #pragma once
 
-#include "signature.hpp"
-#include "types.hpp"
+#include "ffi/signature.hpp"
+#include "ffi/types.hpp"
 
 #include <memory>
 #include <string>
@@ -85,5 +85,10 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
                               std::string &error);
 
 bool parseCSource(const std::string &source, ParsedCSource &result, std::string &error);
+
+// Private aggregate-definition parsers shared with parser.cpp.
+bool parseStructDefinition(const std::string &source, TypeContext *context, std::string &error);
+bool parseUnionDefinition(const std::string &source, TypeContext *context, std::string &error);
+bool parseEnumDefinition(const std::string &source, TypeContext *context, std::string &error);
 
 }} // namespace edon::ffi

@@ -4,14 +4,14 @@
 
 class EdonRuntime {
 private:
-    JSGlobalContextRef context;
+  JSGlobalContextRef context;
 
-    void bootstrapCoreLibraries();
+  void bootstrapCoreLibraries();
 
 public:
-    EdonRuntime();
-    ~EdonRuntime();
+  EdonRuntime();
+  ~EdonRuntime();
 
-    bool executeFile(const std::string& filepath);
-    bool executeSource(const std::string& source, const std::string& filename = "<anonymous>");
+  bool executeFile(const std::string &filepath);
+  bool executeSource(const std::string &source, const std::string &filename = "<anonymous>");
 };

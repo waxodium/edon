@@ -1,13 +1,14 @@
-#include "module.hpp"
+#include "ffi/module.hpp"
 
-#include "call.hpp"
-#include "callback.hpp"
-#include "errors.hpp"
-#include "library.hpp"
-#include "memory.hpp"
+#include "ffi/call.hpp"
+#include "ffi/callback.hpp"
+#include "ffi/errors.hpp"
+#include "ffi/library.hpp"
+#include "ffi/memory.hpp"
+#include "ffi/signature.hpp"
+#include "ffi/types.hpp"
+
 #include "parser.hpp"
-#include "signature.hpp"
-#include "types.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 

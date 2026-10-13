@@ -3,6 +3,6 @@
 #include <string>
 
 namespace edon {
-    void registerNativeIO(JSGlobalContextRef context);
-    void initSystemIO();
-}
+void registerNativeIO(JSGlobalContextRef context);
+void initSystemIO();
+} // namespace edon

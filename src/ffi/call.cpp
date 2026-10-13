@@ -1,9 +1,9 @@
-#include "call.hpp"
-#include "callback.hpp"
-#include "errors.hpp"
-#include "memory.hpp"
-#include "module.hpp"
-#include "signature.hpp"
+#include "ffi/call.hpp"
+#include "ffi/callback.hpp"
+#include "ffi/errors.hpp"
+#include "ffi/memory.hpp"
+#include "ffi/module.hpp"
+#include "ffi/signature.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 

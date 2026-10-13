@@ -1,7 +1,7 @@
 #include "runtime.hpp"
-#include "runtime_output.hpp"
-#include "api.hpp"
+#include "ffi/api.hpp"
 #include "native_io.hpp"
+#include "runtime_output.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -9,131 +9,85 @@
 
 namespace {
 
-void setRequireError(
-    JSContextRef context,
-    JSValueRef *error,
-    const char *message) {
+void setRequireError(JSContextRef context, JSValueRef *error, const char *message) {
+  if (!error) return;
 
-    if (!error)
-        return;
+  JSStringRef text = JSStringCreateWithUTF8CString(message);
+  JSValueRef argument = JSValueMakeString(context, text);
 
-    JSStringRef text = JSStringCreateWithUTF8CString(message);
-    JSValueRef argument = JSValueMakeString(context, text);
+  *error = JSObjectMakeError(context, 1, &argument, nullptr);
 
-    *error = JSObjectMakeError(
-        context,
-        1,
-        &argument,
-        nullptr);
-
-    JSStringRelease(text);
+  JSStringRelease(text);
 }
 
-JSValueRef jsRequire(
-    JSContextRef context,
-    JSObjectRef,
-    JSObjectRef,
-    std::size_t argumentCount,
-    const JSValueRef arguments[],
-    JSValueRef *error) {
+JSValueRef jsRequire(JSContextRef context, JSObjectRef, JSObjectRef, std::size_t argumentCount,
+                     const JSValueRef arguments[], JSValueRef *error) {
+  if (argumentCount != 1 || !JSValueIsString(context, arguments[0])) {
+    setRequireError(context, error, "require() requires exactly one module name string");
 
-    if (argumentCount != 1 ||
-        !JSValueIsString(context, arguments[0])) {
+    return JSValueMakeUndefined(context);
+  }
 
-        setRequireError(
-            context,
-            error,
-            "require() requires exactly one module name string");
+  JSStringRef text = JSValueToStringCopy(context, arguments[0], error);
 
-        return JSValueMakeUndefined(context);
-    }
+  if (!text) return JSValueMakeUndefined(context);
 
-    JSStringRef text =
-        JSValueToStringCopy(context, arguments[0], error);
+  const std::size_t maxSize = JSStringGetMaximumUTF8CStringSize(text);
 
-    if (!text)
-        return JSValueMakeUndefined(context);
+  std::string name(maxSize, '\0');
 
-    const std::size_t maxSize =
-        JSStringGetMaximumUTF8CStringSize(text);
+  const std::size_t size = JSStringGetUTF8CString(text, name.data(), maxSize);
 
-    std::string name(maxSize, '\0');
+  JSStringRelease(text);
 
-    const std::size_t size =
-        JSStringGetUTF8CString(
-            text,
-            name.data(),
-            maxSize);
+  if (size == 0) {
+    setRequireError(context, error, "require() received an invalid module name");
 
-    JSStringRelease(text);
+    return JSValueMakeUndefined(context);
+  }
 
-    if (size == 0) {
-        setRequireError(
-            context,
-            error,
-            "require() received an invalid module name");
+  name.resize(size - 1);
 
-        return JSValueMakeUndefined(context);
-    }
-
-    name.resize(size - 1);
-
-    return edon::ffi::requireModule(
-        context,
-        name,
-        error);
+  return edon::ffi::requireModule(context, name, error);
 }
 
 void registerRequire(JSGlobalContextRef context) {
-    JSObjectRef global =
-        JSContextGetGlobalObject(context);
+  JSObjectRef global = JSContextGetGlobalObject(context);
 
-    JSStringRef name =
-        JSStringCreateWithUTF8CString("require");
+  JSStringRef name = JSStringCreateWithUTF8CString("require");
 
-    JSObjectRef function =
-        JSObjectMakeFunctionWithCallback(
-            context,
-            name,
-            jsRequire);
+  JSObjectRef function = JSObjectMakeFunctionWithCallback(context, name, jsRequire);
 
-    if (function) {
-        JSObjectSetProperty(
-            context,
-            global,
-            name,
-            function,
-            kJSPropertyAttributeNone,
-            nullptr);
-    }
+  if (function) {
+    JSObjectSetProperty(context, global, name, function, kJSPropertyAttributeNone, nullptr);
+  }
 
-    JSStringRelease(name);
+  JSStringRelease(name);
 }
 
 } // namespace
 
 EdonRuntime::EdonRuntime() {
-    edon::initSystemIO();
+  edon::initSystemIO();
 
-    context = JSGlobalContextCreate(nullptr);
+  context = JSGlobalContextCreate(nullptr);
 
-    edon::registerNativeIO(context);
-    edon::ffi::registerNamespace(context);
+  edon::registerNativeIO(context);
+  edon::ffi::registerNamespace(context);
 
-    registerRequire(context);
-    bootstrapCoreLibraries();
+  registerRequire(context);
+  bootstrapCoreLibraries();
 }
 
 EdonRuntime::~EdonRuntime() {
-    if (!context)
-        return;
+  if (!context) return;
 
-    JSGlobalContextRelease(context);
-    context = nullptr;
+  JSGlobalContextRelease(context);
+  context = nullptr;
 }
 
 void EdonRuntime::bootstrapCoreLibraries() {
-    const char *bootstrapJS = R"js(
+  const char *bootstrapJS = R"js(
         (function() {
             const styles = {
                 bold: "\x1b[1m", reset: "\x1b[0m", gray: "\x1b[90m",
@@ -493,74 +447,51 @@ void EdonRuntime::bootstrapCoreLibraries() {
         })();
     )js";
 
-    executeSource(bootstrapJS, "<bootstrap:core>");
+  executeSource(bootstrapJS, "<bootstrap:core>");
 }
 
-bool EdonRuntime::executeSource(
-    const std::string &source,
-    const std::string &filename) {
+bool EdonRuntime::executeSource(const std::string &source, const std::string &filename) {
+  JSStringRef jsSource = JSStringCreateWithUTF8CString(source.c_str());
 
-    JSStringRef jsSource =
-        JSStringCreateWithUTF8CString(source.c_str());
+  JSStringRef jsFilename = JSStringCreateWithUTF8CString(filename.c_str());
 
-    JSStringRef jsFilename =
-        JSStringCreateWithUTF8CString(filename.c_str());
+  if (!jsSource || !jsFilename) {
+    if (jsSource) JSStringRelease(jsSource);
 
-    if (!jsSource || !jsFilename) {
-        if (jsSource)
-            JSStringRelease(jsSource);
+    if (jsFilename) JSStringRelease(jsFilename);
 
-        if (jsFilename)
-            JSStringRelease(jsFilename);
+    std::cerr << "Uncaught Error: Failed to create JavaScript source strings\n";
 
-        std::cerr
-            << "Uncaught Error: Failed to create JavaScript source strings\n";
+    return false;
+  }
 
-        return false;
-    }
+  JSValueRef error = nullptr;
 
-    JSValueRef error = nullptr;
+  (void)JSEvaluateScript(context, jsSource, nullptr, jsFilename, 1, &error);
 
-    (void)JSEvaluateScript(
-        context,
-        jsSource,
-        nullptr,
-        jsFilename,
-        1,
-        &error);
+  JSStringRelease(jsSource);
+  JSStringRelease(jsFilename);
 
-    JSStringRelease(jsSource);
-    JSStringRelease(jsFilename);
+  if (error) {
+    edon::printDiagnostic(source, filename, context, error);
 
-    if (error) {
-        edon::printDiagnostic(
-            source,
-            filename,
-            context,
-            error);
+    return false;
+  }
 
-        return false;
-    }
-
-    return true;
+  return true;
 }
 
 bool EdonRuntime::executeFile(const std::string &filepath) {
-    std::ifstream file(filepath);
+  std::ifstream file(filepath);
 
-    if (!file.is_open()) {
-        std::cerr
-            << "edon error: Cannot open file "
-            << filepath
-            << '\n';
+  if (!file.is_open()) {
+    std::cerr << "edon error: Cannot open file " << filepath << '\n';
 
-        return false;
-    }
+    return false;
+  }
 
-    std::stringstream buffer;
-    buffer << file.rdbuf();
+  std::stringstream buffer;
+  buffer << file.rdbuf();
 
-    return executeSource(
-        buffer.str(),
-        filepath);
+  return executeSource(buffer.str(), filepath);
 }

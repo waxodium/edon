@@ -1,4 +1,4 @@
-#include "errors.hpp"
+#include "ffi/errors.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 

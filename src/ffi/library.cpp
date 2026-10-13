@@ -1,4 +1,4 @@
-#include "library.hpp"
+#include "ffi/library.hpp"
 
 #include "parser.hpp"
 

@@ -1,5 +1,5 @@
-#include "types.hpp"
-#include "signature.hpp"
+#include "ffi/types.hpp"
+#include "ffi/signature.hpp"
 
 #include <ffi.h>
 

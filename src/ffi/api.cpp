@@ -1,7 +1,7 @@
-#include "api.hpp"
+#include "ffi/api.hpp"
 
-#include "errors.hpp"
-#include "module.hpp"
+#include "ffi/errors.hpp"
+#include "ffi/module.hpp"
 
 namespace edon { namespace ffi {
 

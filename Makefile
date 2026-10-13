@@ -2,7 +2,7 @@ CXX := g++
 
 SRC_DIR := src
 FFI_DIR := $(SRC_DIR)/ffi
-FFI_INCLUDE_DIR := $(FFI_DIR)/includes
+PARSER_DIR := $(FFI_DIR)/parser
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/edon
 
@@ -13,7 +13,8 @@ CXXFLAGS := \
 	-Werror \
 	-O2 \
 	-I$(SRC_DIR) \
-	-I$(FFI_INCLUDE_DIR) \
+	-Iincludes \
+	-I$(PARSER_DIR) \
 	$(shell pkg-config --cflags javascriptcoregtk-4.1)
 
 LDFLAGS := \
@@ -24,7 +25,10 @@ LDFLAGS := \
 	-lm
 
 SRC_SRCS := $(wildcard $(SRC_DIR)/*.cpp)
-FFI_SRCS := $(wildcard $(FFI_DIR)/*.cpp)
+FFI_SRCS := \
+	$(wildcard $(FFI_DIR)/*.cpp) \
+	$(wildcard $(PARSER_DIR)/*.cpp)
+
 SRCS := $(SRC_SRCS) $(FFI_SRCS)
 
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -46,3 +50,4 @@ run: $(TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
