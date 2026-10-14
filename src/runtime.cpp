@@ -12,13 +12,26 @@
 
 namespace {
 
-void setRequireError(JSContextRef context, JSValueRef *error, const char *message) {
+void setRequireError(JSContextRef context, JSValueRef *error, const char *message,
+                     const char *code = nullptr) {
   if (!error) return;
 
   JSStringRef text = JSStringCreateWithUTF8CString(message);
   JSValueRef argument = JSValueMakeString(context, text);
 
   *error = JSObjectMakeError(context, 1, &argument, nullptr);
+
+  if (*error && code) {
+    JSObjectRef object = JSValueToObject(context, *error, nullptr);
+    JSStringRef key = JSStringCreateWithUTF8CString("code");
+    JSStringRef value = JSStringCreateWithUTF8CString(code);
+    if (object && key && value) {
+      JSValueRef codeValue = JSValueMakeString(context, value);
+      JSObjectSetProperty(context, object, key, codeValue, kJSPropertyAttributeNone, nullptr);
+    }
+    if (key) JSStringRelease(key);
+    if (value) JSStringRelease(value);
+  }
 
   JSStringRelease(text);
 }
@@ -44,6 +57,54 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object, const char *nam
   JSStringRelease(key);
 
   return value;
+}
+
+void markCommonJSWrapperError(JSContextRef context, JSValueRef error, const std::string &filepath) {
+  if (!context || !error || !JSValueIsObject(context, error) || filepath.empty()) return;
+
+  JSObjectRef object = JSValueToObject(context, error, nullptr);
+  if (!object) return;
+
+  JSValueRef propertyError = nullptr;
+  JSValueRef value = getProperty(context, object, "edonCommonJSWrapperFiles", &propertyError);
+  JSObjectRef files = nullptr;
+
+  if (!propertyError && value && JSValueIsObject(context, value)) {
+    files = JSValueToObject(context, value, nullptr);
+    if (files && !JSValueIsArray(context, value)) files = nullptr;
+  }
+
+  if (!files) {
+    files = JSObjectMakeArray(context, 0, nullptr, nullptr);
+    if (!files) return;
+    setProperty(context, object, "edonCommonJSWrapperFiles", files);
+  }
+
+  JSStringRef lengthKey = JSStringCreateWithUTF8CString("length");
+  if (!lengthKey) return;
+  JSValueRef lengthValue = JSObjectGetProperty(context, files, lengthKey, nullptr);
+  JSStringRelease(lengthKey);
+  const double rawLength = lengthValue ? JSValueToNumber(context, lengthValue, nullptr) : 0;
+  const std::size_t length = rawLength > 0 ? static_cast<std::size_t>(rawLength) : 0;
+
+  for (std::size_t i = 0; i < length; ++i) {
+    JSValueRef existing =
+        JSObjectGetPropertyAtIndex(context, files, static_cast<unsigned>(i), nullptr);
+    JSStringRef text = JSValueToStringCopy(context, existing, nullptr);
+    if (!text) continue;
+    const std::size_t capacity = JSStringGetMaximumUTF8CStringSize(text);
+    std::string existingPath(capacity, '\0');
+    const std::size_t size = JSStringGetUTF8CString(text, existingPath.data(), capacity);
+    JSStringRelease(text);
+    if (size > 0) existingPath.resize(size - 1);
+    if (existingPath == filepath) return;
+  }
+
+  JSStringRef pathString = JSStringCreateWithUTF8CString(filepath.c_str());
+  if (!pathString) return;
+  JSValueRef pathValue = JSValueMakeString(context, pathString);
+  JSStringRelease(pathString);
+  JSObjectSetPropertyAtIndex(context, files, static_cast<unsigned>(length), pathValue, nullptr);
 }
 
 } // namespace
@@ -143,7 +204,8 @@ JSValueRef EdonRuntime::requireModule(const std::string &name, const std::string
 
     return loadCommonJSFile(fs::weakly_canonical(requested).string(), error);
   } catch (const fs::filesystem_error &) {
-    setRequireError(context, error, "Could not resolve the requested module path");
+    setRequireError(context, error, "Could not resolve the requested module path",
+                    "ModuleNotFound");
 
     return JSValueMakeUndefined(context);
   }
@@ -157,7 +219,7 @@ JSValueRef EdonRuntime::loadCommonJSFile(const std::string &filepath, JSValueRef
   try {
     resolved = fs::weakly_canonical(filepath).string();
   } catch (const fs::filesystem_error &) {
-    setRequireError(context, error, "Could not resolve module path");
+    setRequireError(context, error, "Could not resolve module path", "ModuleNotFound");
     return JSValueMakeUndefined(context);
   }
 
@@ -170,7 +232,7 @@ JSValueRef EdonRuntime::loadCommonJSFile(const std::string &filepath, JSValueRef
   if (!file.is_open()) {
     const std::string message = "Cannot open module: " + resolved;
 
-    setRequireError(context, error, message.c_str());
+    setRequireError(context, error, message.c_str(), "ModuleNotFound");
 
     return JSValueMakeUndefined(context);
   }
@@ -181,7 +243,7 @@ JSValueRef EdonRuntime::loadCommonJSFile(const std::string &filepath, JSValueRef
   if (file.bad()) {
     const std::string message = "Failed to read module: " + resolved;
 
-    setRequireError(context, error, message.c_str());
+    setRequireError(context, error, message.c_str(), "ModuleLoadFailed");
 
     return JSValueMakeUndefined(context);
   }
@@ -256,6 +318,7 @@ JSValueRef EdonRuntime::loadCommonJSFile(const std::string &filepath, JSValueRef
   JSStringRelease(dirnameString);
 
   if (localError) {
+    markCommonJSWrapperError(context, localError, resolved);
     moduleCache.erase(resolved);
     JSValueUnprotect(context, module);
 

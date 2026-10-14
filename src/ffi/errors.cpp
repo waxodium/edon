@@ -176,7 +176,80 @@ void setProperty(JSContextRef context, JSObjectRef object, const char *name, JSV
   JSStringRelease(property);
 }
 
-JSObjectRef makeBasicError(JSContextRef context, const std::string &type,
+const char *errorCodeName(ErrorCode code) {
+  switch (code) {
+  case ErrorCode::InvalidArgumentCount: return "InvalidArgumentCount";
+  case ErrorCode::ArgumentCountMismatch: return "ArgumentCountMismatch";
+  case ErrorCode::InvalidArgument: return "InvalidArgument";
+  case ErrorCode::InvalidArgumentList: return "InvalidArgumentList";
+  case ErrorCode::InvalidSignature: return "InvalidSignature";
+  case ErrorCode::SignaturePreparationFailed: return "SignaturePreparationFailed";
+  case ErrorCode::MissingReturnType: return "MissingReturnType";
+  case ErrorCode::MissingArgumentTypes: return "MissingArgumentTypes";
+  case ErrorCode::MissingArgumentType: return "MissingArgumentType";
+  case ErrorCode::EmptyReturnType: return "EmptyReturnType";
+  case ErrorCode::EmptyArgumentType: return "EmptyArgumentType";
+  case ErrorCode::InvalidType: return "InvalidType";
+  case ErrorCode::UnknownReturnType: return "UnknownReturnType";
+  case ErrorCode::UnknownArgumentType: return "UnknownArgumentType";
+  case ErrorCode::UnsupportedType: return "UnsupportedType";
+  case ErrorCode::UnsupportedReturnType: return "UnsupportedReturnType";
+  case ErrorCode::UnsupportedArgumentType: return "UnsupportedArgumentType";
+  case ErrorCode::InvalidNativeModule: return "InvalidNativeModule";
+  case ErrorCode::InvalidNativeFunction: return "InvalidNativeFunction";
+  case ErrorCode::EmptyFunctionName: return "EmptyFunctionName";
+  case ErrorCode::FunctionNotFound: return "FunctionNotFound";
+  case ErrorCode::EmptyModulePath: return "EmptyModulePath";
+  case ErrorCode::ModuleLoadFailed: return "ModuleLoadFailed";
+  case ErrorCode::ModuleNotFound: return "ModuleNotFound";
+  case ErrorCode::ModuleSystemUnavailable: return "ModuleSystemUnavailable";
+  case ErrorCode::MissingSource: return "MissingSource";
+  case ErrorCode::InvalidSource: return "InvalidSource";
+  case ErrorCode::EmptySource: return "EmptySource";
+  case ErrorCode::EmptyTemplate: return "EmptyTemplate";
+  case ErrorCode::TemplateSubstitution: return "TemplateSubstitution";
+  case ErrorCode::CompilationFailed: return "CompilationFailed";
+  case ErrorCode::InvalidPointer: return "InvalidPointer";
+  case ErrorCode::InvalidMemoryArgument: return "InvalidMemoryArgument";
+  case ErrorCode::InvalidBuffer: return "InvalidBuffer";
+  case ErrorCode::InvalidBufferSize: return "InvalidBufferSize";
+  case ErrorCode::InvalidAllocation: return "InvalidAllocation";
+  case ErrorCode::AllocationFailed: return "AllocationFailed";
+  case ErrorCode::FreedMemory: return "FreedMemory";
+  case ErrorCode::UntrackedMemory: return "UntrackedMemory";
+  case ErrorCode::AlreadyFreed: return "AlreadyFreed";
+  case ErrorCode::NotOwnedMemory: return "NotOwnedMemory";
+  case ErrorCode::NullPointer: return "NullPointer";
+  case ErrorCode::AddressOfInvalidArgument: return "AddressOfInvalidArgument";
+  case ErrorCode::FreeInvalidArgument: return "FreeInvalidArgument";
+  case ErrorCode::ExpectedNumber: return "ExpectedNumber";
+  case ErrorCode::ExpectedString: return "ExpectedString";
+  case ErrorCode::ExpectedObject: return "ExpectedObject";
+  case ErrorCode::ExpectedFunction: return "ExpectedFunction";
+  case ErrorCode::ExpectedPointer: return "ExpectedPointer";
+  case ErrorCode::InvalidValue: return "InvalidValue";
+  case ErrorCode::InvalidInteger: return "InvalidInteger";
+  case ErrorCode::IntegerOutOfRange: return "IntegerOutOfRange";
+  case ErrorCode::UnsafeInteger: return "UnsafeInteger";
+  case ErrorCode::InvalidFloat: return "InvalidFloat";
+  case ErrorCode::FloatOverflow: return "FloatOverflow";
+  case ErrorCode::InvalidCString: return "InvalidCString";
+  case ErrorCode::CallbackInvalidArgument: return "CallbackInvalidArgument";
+  case ErrorCode::CallbackAlreadyDestroyed: return "CallbackAlreadyDestroyed";
+  case ErrorCode::CallbackCreationFailed: return "CallbackCreationFailed";
+  case ErrorCode::NativeCallFailed: return "NativeCallFailed";
+  case ErrorCode::NativeCrash: return "NativeCrash";
+  case ErrorCode::NativeSegmentationFault: return "NativeSegmentationFault";
+  case ErrorCode::ObjectCreationFailed: return "ObjectCreationFailed";
+  case ErrorCode::PropertyCreationFailed: return "PropertyCreationFailed";
+  case ErrorCode::FunctionCreationFailed: return "FunctionCreationFailed";
+  case ErrorCode::StateCreationFailed: return "StateCreationFailed";
+  case ErrorCode::InternalError: return "InternalError";
+  }
+  return "InternalError";
+}
+
+JSObjectRef makeBasicError(JSContextRef context, ErrorCode code, const std::string &type,
                            const std::string &message) {
   JSStringRef messageString = makeString(message);
 
@@ -194,128 +267,10 @@ JSObjectRef makeBasicError(JSContextRef context, const std::string &type,
 
   if (name) setProperty(context, error, "name", name);
 
+  JSValueRef codeValue = makeStringValue(context, errorCodeName(code));
+  if (codeValue) setProperty(context, error, "code", codeValue);
+
   return error;
-}
-
-std::vector<std::string> splitLines(const std::string &source) {
-  std::vector<std::string> lines;
-  std::size_t start = 0;
-
-  while (start <= source.size()) {
-    const std::size_t end = source.find('\n', start);
-
-    if (end == std::string::npos) {
-      lines.push_back(source.substr(start));
-      break;
-    }
-
-    lines.push_back(source.substr(start, end - start));
-
-    start = end + 1;
-  }
-
-  return lines;
-}
-
-std::size_t visualColumn(const std::string &line, std::size_t column) {
-  if (column == 0) return 0;
-
-  const std::size_t characterIndex = std::min(column - 1, line.size());
-
-  std::size_t visual = 0;
-
-  for (std::size_t i = 0; i < characterIndex; ++i) {
-    if (line[i] == '\t') visual += 4 - (visual % 4);
-    else
-      ++visual;
-  }
-
-  return visual;
-}
-
-std::string makeCaretLine(const std::string &sourceLine, const SourceLocation &location) {
-  const std::size_t column = visualColumn(sourceLine, location.column);
-
-  std::size_t width = 1;
-
-  if (location.endColumn > location.column) {
-    const std::size_t end = visualColumn(sourceLine, location.endColumn);
-
-    if (end > column) width = end - column;
-  }
-
-  std::string result(column, ' ');
-  result += '^';
-
-  if (width > 1) result.append(width - 1, '~');
-
-  return result;
-}
-
-std::string renderSourceExcerpt(const std::string &source, const SourceLocation &location) {
-  if (source.empty() || location.line == 0) return {};
-
-  const std::vector<std::string> lines = splitLines(source);
-
-  const std::size_t lineIndex = location.line - 1;
-
-  if (lineIndex >= lines.size()) return {};
-
-  const std::size_t firstLine = lineIndex > 0 ? lineIndex - 1 : lineIndex;
-
-  const std::size_t lastLine = std::min(lineIndex + 1, lines.size() - 1);
-
-  std::string result;
-
-  for (std::size_t i = firstLine; i <= lastLine; ++i) {
-    result += std::to_string(i + 1);
-    result += " | ";
-    result += lines[i];
-    result += '\n';
-
-    if (i == lineIndex) {
-      result += "    ";
-      result += makeCaretLine(lines[i], location);
-      result += '\n';
-    }
-  }
-
-  return result;
-}
-
-void appendLocation(std::string &message, const SourceFrame &frame) {
-  message += "\n    at ";
-
-  if (!frame.context.empty()) message += frame.context;
-  else
-    message += "<anonymous>";
-
-  if (!frame.filename.empty()) {
-    message += " (";
-    message += frame.filename;
-
-    if (frame.location.line != 0) {
-      message += ":";
-      message += std::to_string(frame.location.line);
-    }
-
-    if (frame.location.column != 0) {
-      message += ":";
-      message += std::to_string(frame.location.column);
-    }
-
-    message += ")";
-  } else if (frame.location.line != 0) {
-    message += " (";
-    message += std::to_string(frame.location.line);
-
-    if (frame.location.column != 0) {
-      message += ":";
-      message += std::to_string(frame.location.column);
-    }
-
-    message += ")";
-  }
 }
 
 } // namespace
@@ -355,28 +310,28 @@ std::string formatError(ErrorCode code, const std::string &value, int number) {
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code) {
-  return makeBasicError(context, errorType(code), formatError(code));
+  return makeBasicError(context, code, errorType(code), formatError(code));
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string &value) {
-  return makeBasicError(context, errorType(code), formatError(code, value));
+  return makeBasicError(context, code, errorType(code), formatError(code, value));
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t value) {
-  return makeBasicError(context, errorType(code), formatError(code, value));
+  return makeBasicError(context, code, errorType(code), formatError(code, value));
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code, std::size_t first, std::size_t second) {
-  return makeBasicError(context, errorType(code), formatError(code, first, second));
+  return makeBasicError(context, code, errorType(code), formatError(code, first, second));
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string &value,
                       std::size_t index) {
-  return makeBasicError(context, errorType(code), formatError(code, value, index));
+  return makeBasicError(context, code, errorType(code), formatError(code, value, index));
 }
 
 JSObjectRef makeError(JSContextRef context, ErrorCode code, const std::string &value, int number) {
-  return makeBasicError(context, errorType(code), formatError(code, value, number));
+  return makeBasicError(context, code, errorType(code), formatError(code, value, number));
 }
 
 void throwError(JSContextRef context, JSValueRef *error, ErrorCode code) {
@@ -420,31 +375,23 @@ void throwError(JSContextRef context, JSValueRef *error, ErrorCode code, const s
 
 JSObjectRef makeCompilationError(JSContextRef context, const std::string &source,
                                  const SourceDiagnostic &diagnostic) {
-  std::string message;
+  JSObjectRef error = makeBasicError(context, ErrorCode::CompilationFailed,
+                                     errorType(ErrorCode::CompilationFailed), diagnostic.message);
+  if (!error) return nullptr;
 
-  const std::string excerpt = renderSourceExcerpt(source, diagnostic.location);
+  std::string compilerDiagnostic = diagnostic.filename;
+  if (!compilerDiagnostic.empty()) compilerDiagnostic += ":";
+  compilerDiagnostic +=
+      std::to_string(diagnostic.location.line == 0 ? 1 : diagnostic.location.line);
+  compilerDiagnostic += ": ";
+  compilerDiagnostic += diagnostic.message;
 
-  if (!excerpt.empty()) message += excerpt;
+  JSValueRef compilerError = makeStringValue(context, compilerDiagnostic);
+  JSValueRef compilerSource = makeStringValue(context, source);
+  if (compilerError) setProperty(context, error, "compilerError", compilerError);
+  if (compilerSource) setProperty(context, error, "compilerSource", compilerSource);
 
-  message += errorType(ErrorCode::CompilationFailed);
-  message += ": ";
-  message += diagnostic.message;
-
-  if (!diagnostic.frames.empty()) {
-    for (const SourceFrame &frame : diagnostic.frames) { appendLocation(message, frame); }
-  } else {
-    SourceFrame frame;
-
-    frame.context = diagnostic.filename.empty() ? "C source" : diagnostic.filename;
-
-    frame.filename = diagnostic.filename;
-
-    frame.location = diagnostic.location;
-
-    appendLocation(message, frame);
-  }
-
-  return makeBasicError(context, errorType(ErrorCode::CompilationFailed), message);
+  return error;
 }
 
 }} // namespace edon::ffi

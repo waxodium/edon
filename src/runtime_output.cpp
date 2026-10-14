@@ -1,9 +1,11 @@
 #include "runtime_output.hpp"
 #include <JavaScriptCore/JavaScript.h>
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -29,6 +31,8 @@ struct SourceLocation {
   std::size_t line = 0;
   std::size_t column = 0;
 };
+
+std::string resolvePath(const std::string &reportedPath, const std::string &sourceFilename);
 
 std::string jsStringToUTF8(JSStringRef string) {
   if (!string) return {};
@@ -76,6 +80,49 @@ std::size_t getNumberProperty(JSContextRef context, JSObjectRef object, const ch
   return static_cast<std::size_t>(number);
 }
 
+std::vector<std::string> getStringArrayProperty(JSContextRef context, JSObjectRef object,
+                                                const char *name) {
+  std::vector<std::string> values;
+  if (!object || !name) return values;
+
+  JSStringRef key = JSStringCreateWithUTF8CString(name);
+  if (!key) return values;
+  JSValueRef error = nullptr;
+  JSValueRef value = JSObjectGetProperty(context, object, key, &error);
+  JSStringRelease(key);
+  if (error || !value || !JSValueIsObject(context, value)) return values;
+
+  JSObjectRef array = JSValueToObject(context, value, nullptr);
+  if (!array || !JSValueIsArray(context, value)) return values;
+
+  JSStringRef lengthKey = JSStringCreateWithUTF8CString("length");
+  if (!lengthKey) return values;
+  JSValueRef lengthValue = JSObjectGetProperty(context, array, lengthKey, nullptr);
+  JSStringRelease(lengthKey);
+  if (!lengthValue || !JSValueIsNumber(context, lengthValue)) return values;
+
+  const double rawLength = JSValueToNumber(context, lengthValue, nullptr);
+  if (rawLength < 0 || rawLength > 10000) return values;
+  const std::size_t length = static_cast<std::size_t>(rawLength);
+  values.reserve(length);
+
+  for (std::size_t i = 0; i < length; ++i) {
+    JSValueRef item = JSObjectGetPropertyAtIndex(context, array, static_cast<unsigned>(i), nullptr);
+    const std::string path = valueToString(context, item);
+    if (!path.empty()) values.push_back(path);
+  }
+  return values;
+}
+
+bool isWrappedCommonJSPath(const std::string &path, const std::vector<std::string> &wrappedPaths,
+                           const std::string &filename) {
+  const std::string resolvedPath = resolvePath(path, filename);
+  for (const std::string &wrappedPath : wrappedPaths) {
+    if (resolvedPath == resolvePath(wrappedPath, filename)) return true;
+  }
+  return false;
+}
+
 std::string trim(const std::string &value) {
   std::size_t first = 0;
   while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) ++first;
@@ -101,23 +148,31 @@ bool parseUnsigned(const std::string &value, std::size_t &result) {
 bool parseLocationSuffix(const std::string &value, SourceLocation &location) {
   if (value.empty()) return false;
   const std::size_t lastColon = value.rfind(':');
-  if (lastColon == std::string::npos) return false;
+  if (lastColon == std::string::npos || lastColon + 1 >= value.size()) return false;
+
+  std::size_t trailingNumber = 0;
+  if (!parseUnsigned(value.substr(lastColon + 1), trailingNumber) || trailingNumber == 0)
+    return false;
+
   const std::size_t prevColon = value.rfind(':', lastColon - 1);
-  if (prevColon == std::string::npos || prevColon + 1 >= lastColon || lastColon + 1 >= value.size())
-    return false;
+  if (prevColon != std::string::npos && prevColon + 1 < lastColon) {
+    std::size_t line = 0;
+    if (parseUnsigned(value.substr(prevColon + 1, lastColon - prevColon - 1), line) && line > 0) {
+      const std::string filename = value.substr(0, prevColon);
+      if (!filename.empty()) {
+        location.filename = filename;
+        location.line = line;
+        location.column = trailingNumber;
+        return true;
+      }
+    }
+  }
 
-  const std::string filename = value.substr(0, prevColon);
-  const std::string lineText = value.substr(prevColon + 1, lastColon - prevColon - 1);
-  const std::string columnText = value.substr(lastColon + 1);
-
-  std::size_t line = 0, column = 0;
-  if (!parseUnsigned(lineText, line) || !parseUnsigned(columnText, column) || filename.empty() ||
-      line == 0)
-    return false;
-
+  const std::string filename = value.substr(0, lastColon);
+  if (filename.empty()) return false;
   location.filename = filename;
-  location.line = line;
-  location.column = column;
+  location.line = trailingNumber;
+  location.column = 0;
   return true;
 }
 
@@ -128,6 +183,10 @@ bool parseStackLocation(const std::string &stack, SourceLocation &location) {
     line = trim(line);
     if (line.rfind("at ", 0) != 0) continue;
     std::string frame = trim(line.substr(3));
+    const std::size_t open = frame.rfind('(');
+    const std::size_t close = frame.rfind(')');
+    if (open != std::string::npos && close == frame.size() - 1 && open < close)
+      frame = frame.substr(open + 1, close - open - 1);
     SourceLocation candidate;
     if (parseLocationSuffix(frame, candidate)) {
       location = candidate;
@@ -135,6 +194,24 @@ bool parseStackLocation(const std::string &stack, SourceLocation &location) {
     }
   }
   return false;
+}
+
+std::vector<SourceLocation> parseStackLocations(const std::string &stack) {
+  std::vector<SourceLocation> locations;
+  std::istringstream stream(stack);
+  std::string line;
+  while (std::getline(stream, line)) {
+    line = trim(line);
+    if (line.rfind("at ", 0) != 0) continue;
+    std::string frame = trim(line.substr(3));
+    const std::size_t open = frame.rfind('(');
+    const std::size_t close = frame.rfind(')');
+    if (open != std::string::npos && close == frame.size() - 1 && open < close)
+      frame = frame.substr(open + 1, close - open - 1);
+    SourceLocation location;
+    if (parseLocationSuffix(frame, location)) locations.push_back(location);
+  }
+  return locations;
 }
 
 std::string sourceLine(const std::string &source, std::size_t lineNumber) {
@@ -374,19 +451,30 @@ bool findReferenceErrorColumn(const std::string &message, const std::string &lin
 
 bool findSyntaxErrorColumn(const std::string &message, const std::string &line,
                            std::size_t &column) {
-  const std::string prefix = "Unexpected token '";
-  const std::size_t start = message.find(prefix);
-  if (start == std::string::npos) return false;
-  const std::size_t tokenStart = start + prefix.size();
-  const std::size_t tokenEnd = message.find('\'', tokenStart);
-  if (tokenEnd == std::string::npos || tokenEnd == tokenStart) return false;
+  const std::string prefixes[] = {"Unexpected token '", "Unexpected token \"",
+                                  "Unexpected string literal \""};
+  for (const std::string &prefix : prefixes) {
+    const std::size_t start = message.find(prefix);
+    if (start == std::string::npos) continue;
 
-  const std::string token = message.substr(tokenStart, tokenEnd - tokenStart);
-  if (token.empty()) return false;
-  const std::size_t position = line.find(token);
-  if (position == std::string::npos) return false;
-  column = position + 1;
-  return true;
+    const char quote = prefix.back();
+    const std::size_t tokenStart = start + prefix.size();
+    const std::size_t tokenEnd = message.find(quote, tokenStart);
+    if (tokenEnd == std::string::npos || tokenEnd == tokenStart) continue;
+
+    const std::string token = message.substr(tokenStart, tokenEnd - tokenStart);
+    if (token.empty()) continue;
+
+    std::size_t position = line.find(token);
+    if (quote == '"') {
+      const std::size_t quotedPosition = line.find(std::string(1, quote) + token + quote);
+      if (quotedPosition != std::string::npos) position = quotedPosition;
+    }
+    if (position == std::string::npos) continue;
+    column = position + 1;
+    return true;
+  }
+  return false;
 }
 
 std::size_t visualColumn(const std::string &line, std::size_t sourceColumn) {
@@ -417,24 +505,31 @@ bool parseCompilerDiagnostic(const std::string &message, std::size_t &line, std:
 }
 
 void printSourceContext(const std::string &source, const SourceLocation &location) {
-  if (location.line == 0) return;
-  std::string current = sourceLine(source, location.line);
-  if (current.empty() && location.line > source.size()) return;
+  if (source.empty() || location.line == 0) return;
+  const std::string current = sourceLine(source, location.line);
+  if (current.empty() && location.line > 1) return;
 
-  std::size_t firstLine = location.line > 2 ? location.line - 2 : 1;
-  std::size_t width = std::to_string(location.line).size();
+  const std::size_t firstLine = location.line > 2 ? location.line - 2 : 1;
+  const std::size_t lineCount =
+      static_cast<std::size_t>(std::count(source.begin(), source.end(), '\n')) +
+      (source.back() == '\n' ? 0 : 1);
 
-  for (std::size_t line = firstLine; line <= location.line; ++line) {
-    std::string lineString = sourceLine(source, line);
-    std::cerr << COLOR_LINE << std::string(width - std::to_string(line).size(), ' ') << line
-              << COLOR_RESET << " | " << highlightSourceLine(lineString) << '\n';
+  const std::size_t lastLine = std::min(location.line + 1, lineCount);
 
+  const std::size_t width = std::to_string(lastLine).size();
+  std::cerr << "    User Code:\n        ```\n";
+
+  for (std::size_t line = firstLine; line <= lastLine; ++line) {
+    const std::string lineString = sourceLine(source, line);
+    std::cerr << "        " << COLOR_LINE << std::string(width - std::to_string(line).size(), ' ')
+              << line << COLOR_RESET << " | " << highlightSourceLine(lineString) << '\n';
     if (line == location.line && location.column > 0) {
-      std::size_t caretColumn = visualColumn(lineString, location.column);
-      std::cerr << std::string(width, ' ') << " | " << std::string(caretColumn - 1, ' ')
-                << COLOR_ERROR << '^' << COLOR_RESET << '\n';
+      const std::size_t caretColumn = visualColumn(lineString, location.column);
+      std::cerr << "        " << std::string(width, ' ') << " | "
+                << std::string(caretColumn - 1, ' ') << COLOR_ERROR << '^' << COLOR_RESET << '\n';
     }
   }
+  std::cerr << "        ```\n";
 }
 
 } // namespace
@@ -465,14 +560,13 @@ void printDiagnostic(const std::string &source, const std::string &filename, JSC
   if (!context || !error) return;
 
   JSObjectRef errorObject = JSValueToObject(context, error, nullptr);
-  std::string errorName, message, stack;
-
+  std::string errorName, message, stack, code;
   if (errorObject) {
     errorName = getStringProperty(context, errorObject, "name");
     message = getStringProperty(context, errorObject, "message");
     stack = getStringProperty(context, errorObject, "stack");
+    code = getStringProperty(context, errorObject, "code");
   }
-
   if (errorName.empty()) errorName = "Error";
   if (message.empty()) message = valueToString(context, error);
 
@@ -481,52 +575,96 @@ void printDiagnostic(const std::string &source, const std::string &filename, JSC
     location.line = getNumberProperty(context, errorObject, "line");
     location.column = getNumberProperty(context, errorObject, "column");
     location.filename = getStringProperty(context, errorObject, "sourceURL");
-    if (location.filename.empty()) {
+    if (location.filename.empty())
       location.filename = getStringProperty(context, errorObject, "sourceURLString");
-    }
   }
 
+  std::vector<SourceLocation> frames = parseStackLocations(stack);
   SourceLocation stackLocation;
   if (parseStackLocation(stack, stackLocation)) {
     if (location.filename.empty()) location.filename = stackLocation.filename;
     if (location.line == 0) location.line = stackLocation.line;
     if (location.column == 0) location.column = stackLocation.column;
   }
-
   if (location.filename.empty()) location.filename = filename;
   if (location.filename.empty()) location.filename = "<anonymous>";
   location.filename = resolvePath(location.filename, filename);
 
-  if (errorName == "ReferenceError" && location.line > 0) {
-    std::string line = sourceLine(source, location.line);
-    std::size_t referenceColumn = 0;
-    if (findReferenceErrorColumn(message, line, location.column, referenceColumn)) {
-      location.column = referenceColumn;
+  const std::vector<std::string> wrappedPaths =
+      errorObject ? getStringArrayProperty(context, errorObject, "edonCommonJSWrapperFiles")
+                  : std::vector<std::string>{};
+
+  if (location.line > 0 && isWrappedCommonJSPath(location.filename, wrappedPaths, filename)) {
+    --location.line;
+  }
+  for (SourceLocation &frame : frames) {
+    frame.filename = resolvePath(frame.filename, filename);
+    if (frame.line > 0 && isWrappedCommonJSPath(frame.filename, wrappedPaths, filename))
+      --frame.line;
+  }
+
+  std::string displaySource;
+  const std::string requestedFilename =
+      filename.empty() ? std::string{} : resolvePath(filename, filename);
+  const bool suppliedSourceMatches =
+      !source.empty() &&
+      (location.filename == requestedFilename || filename.empty() || filename.front() == '<');
+  if (suppliedSourceMatches) displaySource = source;
+
+  if (displaySource.empty() && location.filename != "<anonymous>" &&
+      location.filename.find('<') != 0) {
+    std::ifstream input(location.filename);
+    if (input) {
+      std::ostringstream contents;
+      contents << input.rdbuf();
+      displaySource = contents.str();
     }
   }
+  if (displaySource.empty() && !source.empty()) displaySource = source;
 
+  if (errorName == "ReferenceError" && location.line > 0) {
+    const std::string line = sourceLine(displaySource, location.line);
+    std::size_t referenceColumn = 0;
+    if (findReferenceErrorColumn(message, line, location.column, referenceColumn))
+      location.column = referenceColumn;
+  }
   if (errorName == "SyntaxError" && location.line > 0 && location.column == 0) {
-    std::string line = sourceLine(source, location.line);
+    const std::string line = sourceLine(displaySource, location.line);
     std::size_t syntaxColumn = 0;
-    if (findSyntaxErrorColumn(message, line, syntaxColumn)) { location.column = syntaxColumn; }
+    if (findSyntaxErrorColumn(message, line, syntaxColumn)) location.column = syntaxColumn;
   }
 
-  printSourceContext(source, location);
-  std::cerr << '\n';
-  std::cerr << COLOR_ERROR << errorName << COLOR_RESET << ": " << message << '\n';
-  std::cerr << '\t' << "at " << COLOR_PATH << location.filename << COLOR_RESET;
+  std::cerr << COLOR_ERROR << "┌── ✖" << COLOR_RESET;
+  if (!code.empty()) std::cerr << " [" << code << ']';
+  std::cerr << '\n' << "  " << COLOR_ERROR << errorName << COLOR_RESET << ": " << message << '\n';
 
-  if (location.line > 0) {
-    std::cerr << ':' << location.line;
-    if (location.column > 0) { std::cerr << ':' << location.column; }
+  bool printedFrame = false;
+  for (const SourceLocation &frame : frames) {
+    const std::string framePath = resolvePath(frame.filename, filename);
+    std::cerr << "    at " << COLOR_PATH << framePath << COLOR_RESET << ':' << frame.line;
+    if (frame.column > 0) std::cerr << ':' << frame.column;
+    std::cerr << '\n';
+    printedFrame = true;
   }
-  std::cerr << '\n';
+  if (!printedFrame && !location.filename.empty()) {
+    std::cerr << "    at " << COLOR_PATH << location.filename << COLOR_RESET;
+    if (location.line > 0) {
+      std::cerr << ':' << location.line;
+      if (location.column > 0) std::cerr << ':' << location.column;
+    }
+    std::cerr << '\n';
+  }
+
+  if (!displaySource.empty() && location.line > 0) {
+    std::cerr << '\n';
+    printSourceContext(displaySource, location);
+  }
 
   if (errorObject) {
-    std::string compilerError = getStringProperty(context, errorObject, "compilerError");
-    std::string compilerSource = getStringProperty(context, errorObject, "compilerSource");
+    const std::string compilerError = getStringProperty(context, errorObject, "compilerError");
+    const std::string compilerSource = getStringProperty(context, errorObject, "compilerSource");
     if (!compilerError.empty()) {
-      std::cerr << '\n';
+      std::cerr << '\n' << "    CCompilerError:\n";
       printCompilerDiagnostic(compilerSource, compilerError);
     }
   }
