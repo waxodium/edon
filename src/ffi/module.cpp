@@ -1,12 +1,14 @@
-#include "module.hpp"
+#include "ffi/module.hpp"
 
-#include "call.hpp"
-#include "callback.hpp"
-#include "errors.hpp"
-#include "library.hpp"
-#include "memory.hpp"
+#include "ffi/call.hpp"
+#include "ffi/callback.hpp"
+#include "ffi/errors.hpp"
+#include "ffi/library.hpp"
+#include "ffi/memory.hpp"
+#include "ffi/signature.hpp"
+#include "ffi/types.hpp"
+
 #include "parser.hpp"
-#include "types.hpp"
 
 #include <JavaScriptCore/JavaScript.h>
 
@@ -14,6 +16,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -43,6 +46,7 @@ std::string toString(JSContextRef context, JSValueRef value, JSValueRef *error) 
   if (!string) return {};
 
   const size_t maxSize = JSStringGetMaximumUTF8CStringSize(string);
+
   if (maxSize == 0) {
     JSStringRelease(string);
     return {};
@@ -64,6 +68,7 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object, const char *nam
   if (!object || !name) return nullptr;
 
   JSStringRef property = JSStringCreateWithUTF8CString(name);
+
   if (!property) {
     throwError(context, error, ErrorCode::PropertyCreationFailed);
     return nullptr;
@@ -75,7 +80,8 @@ JSValueRef getProperty(JSContextRef context, JSObjectRef object, const char *nam
   return value;
 }
 
-bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, JSValueRef *error) {
+bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, JSValueRef *error,
+                  TypeContext *typeContext) {
   if (!JSValueIsObject(context, value)) {
     throwError(context, error, ErrorCode::InvalidSignature);
     return false;
@@ -106,12 +112,7 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, 
   std::shared_ptr<Type> returnType;
   std::string parseError;
 
-  if (!parseType(returnName, returnType, parseError)) {
-    throwError(context, error, ErrorCode::UnknownReturnType, returnName);
-    return false;
-  }
-
-  if (!returnType) {
+  if (!parseType(returnName, returnType, parseError, typeContext) || !returnType) {
     throwError(context, error, ErrorCode::UnknownReturnType, returnName);
     return false;
   }
@@ -153,7 +154,13 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, 
 
   Signature parsedSignature;
   parsedSignature.returns = std::move(returnType);
-  parsedSignature.args.reserve(count);
+
+  try {
+    parsedSignature.args.reserve(count);
+  } catch (...) {
+    throwError(context, error, ErrorCode::InvalidArgumentList);
+    return false;
+  }
 
   for (size_t i = 0; i < count; ++i) {
     const std::string index = std::to_string(i);
@@ -187,17 +194,27 @@ bool getSignature(JSContextRef context, JSValueRef value, Signature &signature, 
 
     std::shared_ptr<Type> type;
 
-    if (!parseType(argName, type, parseError)) {
+    if (argName == "...") {
+      if (i + 1 != count) {
+        throwError(context, error, ErrorCode::InvalidArgumentList);
+        return false;
+      }
+
+      parsedSignature.variadic = true;
+      continue;
+    }
+
+    if (!parseType(argName, type, parseError, typeContext) || !type) {
       throwError(context, error, ErrorCode::UnknownArgumentType, argName);
       return false;
     }
 
-    if (!type) {
-      throwError(context, error, ErrorCode::UnknownArgumentType, argName);
+    try {
+      parsedSignature.args.push_back(std::move(type));
+    } catch (...) {
+      throwError(context, error, ErrorCode::InvalidArgumentList);
       return false;
     }
-
-    parsedSignature.args.push_back(std::move(type));
   }
 
   if (!prepareSignature(parsedSignature)) {
@@ -261,7 +278,8 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef, JSObjectRef thisOb
 
   Signature signature;
 
-  if (!getSignature(context, arguments[1], signature, error)) {
+  if (!getSignature(context, arguments[1], signature, error,
+                    moduleHolder->state->typeContext.get())) {
     return JSValueMakeUndefined(context);
   }
 
@@ -275,13 +293,13 @@ JSValueRef moduleCFunction(JSContextRef context, JSObjectRef, JSObjectRef thisOb
 
   auto functionState = std::make_shared<NativeFunctionState>(moduleHolder->state, address, name);
 
-  if (!functionState) {
+  auto *functionHolder = new (std::nothrow) NativeFunctionHolder();
+
+  if (!functionHolder) {
     throwError(context, error, ErrorCode::FunctionCreationFailed);
 
     return JSValueMakeUndefined(context);
   }
-
-  auto *functionHolder = new NativeFunctionHolder();
 
   functionHolder->function = std::move(functionState);
   functionHolder->signature = std::move(signature);
@@ -364,7 +382,7 @@ JSValueRef createCallbackFunction(JSContextRef context, JSObjectRef, JSObjectRef
 
   Signature signature;
 
-  if (!getSignature(context, arguments[1], signature, error)) {
+  if (!getSignature(context, arguments[1], signature, error, nullptr)) {
     return JSValueMakeUndefined(context);
   }
 
@@ -418,6 +436,7 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef, size_t argumentCo
 
     if (!first) {
       throwError(context, error, ErrorCode::MissingSource);
+
       return JSValueMakeUndefined(context);
     }
 
@@ -427,11 +446,13 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef, size_t argumentCo
 
   } else {
     throwError(context, error, ErrorCode::InvalidSource);
+
     return JSValueMakeUndefined(context);
   }
 
   if (source.empty()) {
     throwError(context, error, ErrorCode::EmptySource);
+
     return JSValueMakeUndefined(context);
   }
 
@@ -481,7 +502,14 @@ JSValueRef jsC(JSContextRef context, JSObjectRef, JSObjectRef, size_t argumentCo
     return JSValueMakeUndefined(context);
   }
 
-  auto *holder = new NativeModuleHolder();
+  auto *holder = new (std::nothrow) NativeModuleHolder();
+
+  if (!holder) {
+    throwError(context, error, ErrorCode::ObjectCreationFailed);
+
+    return JSValueMakeUndefined(context);
+  }
+
   holder->state = std::move(module);
 
   JSObjectRef object = JSObjectMake(context, nativeModuleClass, holder);
@@ -530,7 +558,14 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef, si
     return JSValueMakeUndefined(context);
   }
 
-  auto *holder = new NativeModuleHolder();
+  auto *holder = new (std::nothrow) NativeModuleHolder();
+
+  if (!holder) {
+    throwError(context, error, ErrorCode::ObjectCreationFailed);
+
+    return JSValueMakeUndefined(context);
+  }
+
   holder->state = std::move(module);
 
   JSObjectRef object = JSObjectMake(context, nativeModuleClass, holder);
@@ -549,6 +584,7 @@ JSValueRef jsLoadNativeModule(JSContextRef context, JSObjectRef, JSObjectRef, si
 
 void attachFFIExports(JSContextRef context, JSObjectRef module) {
   setFunctionProperty(context, module, "c", jsC);
+
   setFunctionProperty(context, module, "loadLibrary", jsLoadNativeModule);
 
   setFunctionProperty(context, module, "allocateSharedBuffer", allocateSharedBufferFunction);
@@ -589,6 +625,65 @@ void initializeModuleClasses() {
 
     nativeFunctionClass = JSClassCreate(&definition);
   }
+}
+
+JSObjectRef makeNativeFunction(JSContextRef context, void *address, Signature signature,
+                               JSValueRef *error) {
+  if (!nativeFunctionClass) {
+    throwError(context, error, ErrorCode::ModuleSystemUnavailable);
+
+    return nullptr;
+  }
+
+  if (!address || !signature.prepared) {
+    throwError(context, error, ErrorCode::InvalidNativeFunction);
+
+    return nullptr;
+  }
+
+  auto functionState =
+      std::make_shared<NativeFunctionState>(nullptr, address, "<function-pointer>");
+
+  auto *functionHolder = new (std::nothrow) NativeFunctionHolder();
+
+  if (!functionHolder) {
+    throwError(context, error, ErrorCode::FunctionCreationFailed);
+
+    return nullptr;
+  }
+
+  functionHolder->function = std::move(functionState);
+
+  functionHolder->signature = std::move(signature);
+
+  JSObjectRef function = JSObjectMake(context, nativeFunctionClass, functionHolder);
+
+  if (!function) {
+    delete functionHolder;
+
+    throwError(context, error, ErrorCode::FunctionCreationFailed);
+
+    return nullptr;
+  }
+
+  return function;
+}
+
+NativeFunctionState *getNativeFunctionState(JSContextRef context, JSValueRef value) {
+  if (!value || !JSValueIsObject(context, value)) { return nullptr; }
+
+  JSObjectRef object = JSValueToObject(context, value, nullptr);
+
+  if (!object || !nativeFunctionClass ||
+      !JSValueIsObjectOfClass(context, object, nativeFunctionClass)) {
+    return nullptr;
+  }
+
+  auto *holder = static_cast<NativeFunctionHolder *>(JSObjectGetPrivate(object));
+
+  if (!holder || !holder->function) return nullptr;
+
+  return holder->function.get();
 }
 
 JSValueRef requireFFIModule(JSContextRef context, JSValueRef *error) {

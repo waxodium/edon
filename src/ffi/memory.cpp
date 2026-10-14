@@ -1,5 +1,5 @@
-#include "memory.hpp"
-#include "errors.hpp"
+#include "ffi/memory.hpp"
+#include "ffi/errors.hpp"
 
 #include <cstdlib>
 #include <limits>

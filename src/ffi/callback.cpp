@@ -1,7 +1,9 @@
-#include "callback.hpp"
-#include "call.hpp"
-#include "errors.hpp"
-#include "memory.hpp"
+#include "ffi/callback.hpp"
+#include "ffi/call.hpp"
+#include "ffi/errors.hpp"
+#include "ffi/memory.hpp"
+#include "ffi/module.hpp"
+#include "ffi/signature.hpp"
 
 #include <ffi.h>
 
@@ -10,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 namespace edon { namespace ffi {
@@ -58,6 +61,9 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
   case TypeKind::Int16:
     return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int16_t *>(value)));
 
+  case TypeKind::Enum:
+    return JSValueMakeNumber(context, static_cast<double>(*static_cast<const int32_t *>(value)));
+
   case TypeKind::UInt16:
     return JSValueMakeNumber(context, static_cast<double>(*static_cast<const uint16_t *>(value)));
 
@@ -72,6 +78,8 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
 
   case TypeKind::UInt64:
     return JSBigIntCreateWithUInt64(context, *static_cast<const uint64_t *>(value), nullptr);
+
+  case TypeKind::Union: return nullptr;
 
   case TypeKind::Size:
     if (sizeof(std::size_t) == sizeof(uint64_t)) {
@@ -100,6 +108,24 @@ JSValueRef nativeArgumentToJS(JSContextRef context, const std::shared_ptr<Type> 
     void *address = *static_cast<void *const *>(value);
 
     if (!address) return JSValueMakeNull(context);
+
+    if (type->element && type->element->kind == TypeKind::Function) {
+      const std::shared_ptr<Type> &functionType = type->element;
+
+      if (!functionType->functionSignature) { return nullptr; }
+
+      Signature signature;
+
+      signature.returns = functionType->functionSignature->returns;
+      signature.args = functionType->functionSignature->args;
+      if (!prepareSignature(signature)) { return nullptr; }
+
+      JSObjectRef function = makeNativeFunction(context, address, std::move(signature), nullptr);
+
+      if (!function) return nullptr;
+
+      return function;
+    }
 
     if (type->element && type->element->kind == TypeKind::Char) {
       const char *string = static_cast<const char *>(address);
@@ -207,7 +233,6 @@ void CallbackState::destroy() {
 
   if (function && context) {
     JSValueUnprotect(context, function);
-
     function = nullptr;
   }
 
@@ -224,7 +249,6 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function, Signature
                            JSValueRef *error) {
   if (!function || !JSObjectIsFunction(context, function)) {
     throwError(context, error, ErrorCode::ExpectedFunction);
-
     return nullptr;
   }
 
@@ -251,7 +275,6 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function, Signature
   }
 
   state->context = JSContextGetGlobalContext(context);
-
   state->function = function;
   state->signature = std::move(signature);
 
@@ -260,7 +283,7 @@ JSObjectRef createCallback(JSContextRef context, JSObjectRef function, Signature
   state->closure = ffi_closure_alloc(sizeof(ffi_closure), &state->executable);
 
   if (!state->closure || !state->executable) {
-    if (state->closure) ffi_closure_free(state->closure);
+    if (state->closure) { ffi_closure_free(state->closure); }
 
     state->closure = nullptr;
     state->executable = nullptr;
@@ -332,9 +355,9 @@ CallbackState *getCallbackState(JSContextRef context, JSValueRef value) {
 
   JSObjectRef object = JSValueToObject(context, value, nullptr);
 
-  if (!object) return nullptr;
+  if (!object || !callbackClass) { return nullptr; }
 
-  if (!callbackClass) return nullptr;
+  if (!JSValueIsObjectOfClass(context, value, callbackClass)) { return nullptr; }
 
   return static_cast<CallbackState *>(JSObjectGetPrivate(object));
 }

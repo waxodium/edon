@@ -1,139 +1,109 @@
 #include "runtime.hpp"
-#include "runtime_output.hpp"
-#include "api.hpp"
+#include "ffi/api.hpp"
+#include "module_loader.hpp"
 #include "native_io.hpp"
+#include "runtime_output.hpp"
 
-#include <fstream>
 #include <iostream>
-#include <sstream>
+#include <memory>
+#include <string>
 
-namespace {
+struct EdonRuntime::RequireData {
+  EdonRuntime *runtime;
+  std::string parentFilename;
+};
 
-void setRequireError(
-    JSContextRef context,
-    JSValueRef *error,
-    const char *message) {
+JSClassRef EdonRuntime::getRequireClass() {
+  static JSClassRef cls = [] {
+    JSClassDefinition definition = kJSClassDefinitionEmpty;
 
-    if (!error)
-        return;
+    definition.className = "EdonRequire";
+    definition.finalize = &EdonRuntime::finalizeRequire;
+    definition.callAsFunction = &EdonRuntime::requireCallAsFunction;
 
-    JSStringRef text = JSStringCreateWithUTF8CString(message);
-    JSValueRef argument = JSValueMakeString(context, text);
+    return JSClassCreate(&definition);
+  }();
 
-    *error = JSObjectMakeError(
-        context,
-        1,
-        &argument,
-        nullptr);
-
-    JSStringRelease(text);
+  return cls;
 }
 
-JSValueRef jsRequire(
-    JSContextRef context,
-    JSObjectRef,
-    JSObjectRef,
-    std::size_t argumentCount,
-    const JSValueRef arguments[],
-    JSValueRef *error) {
-
-    if (argumentCount != 1 ||
-        !JSValueIsString(context, arguments[0])) {
-
-        setRequireError(
-            context,
-            error,
-            "require() requires exactly one module name string");
-
-        return JSValueMakeUndefined(context);
-    }
-
-    JSStringRef text =
-        JSValueToStringCopy(context, arguments[0], error);
-
-    if (!text)
-        return JSValueMakeUndefined(context);
-
-    const std::size_t maxSize =
-        JSStringGetMaximumUTF8CStringSize(text);
-
-    std::string name(maxSize, '\0');
-
-    const std::size_t size =
-        JSStringGetUTF8CString(
-            text,
-            name.data(),
-            maxSize);
-
-    JSStringRelease(text);
-
-    if (size == 0) {
-        setRequireError(
-            context,
-            error,
-            "require() received an invalid module name");
-
-        return JSValueMakeUndefined(context);
-    }
-
-    name.resize(size - 1);
-
-    return edon::ffi::requireModule(
-        context,
-        name,
-        error);
+void EdonRuntime::finalizeRequire(JSObjectRef object) {
+  delete static_cast<RequireData *>(JSObjectGetPrivate(object));
 }
 
-void registerRequire(JSGlobalContextRef context) {
-    JSObjectRef global =
-        JSContextGetGlobalObject(context);
+JSValueRef EdonRuntime::requireCallAsFunction(JSContextRef context, JSObjectRef function,
+                                              JSObjectRef, std::size_t argumentCount,
+                                              const JSValueRef arguments[], JSValueRef *error) {
+  auto *data = static_cast<RequireData *>(JSObjectGetPrivate(function));
 
-    JSStringRef name =
-        JSStringCreateWithUTF8CString("require");
+  if (!data || argumentCount != 1 || !JSValueIsString(context, arguments[0])) {
+    ModuleLoader::setError(context, error, "require() requires exactly one module name string");
+    return JSValueMakeUndefined(context);
+  }
 
-    JSObjectRef function =
-        JSObjectMakeFunctionWithCallback(
-            context,
-            name,
-            jsRequire);
+  JSStringRef text = JSValueToStringCopy(context, arguments[0], error);
+  if (!text) return JSValueMakeUndefined(context);
 
-    if (function) {
-        JSObjectSetProperty(
-            context,
-            global,
-            name,
-            function,
-            kJSPropertyAttributeNone,
-            nullptr);
-    }
+  const std::size_t capacity = JSStringGetMaximumUTF8CStringSize(text);
+  std::string name(capacity, '\0');
+  const std::size_t size = JSStringGetUTF8CString(text, name.data(), capacity);
+  JSStringRelease(text);
 
-    JSStringRelease(name);
+  if (size == 0) {
+    ModuleLoader::setError(context, error, "require() received an invalid module name");
+    return JSValueMakeUndefined(context);
+  }
+
+  name.resize(size - 1);
+  return data->runtime->moduleLoader->require(name, data->parentFilename, error);
 }
 
-} // namespace
+JSObjectRef EdonRuntime::makeRequire(const std::string &parentFilename) {
+  auto *data = new RequireData{this, parentFilename};
+
+  JSObjectRef function = JSObjectMake(context, getRequireClass(), data);
+
+  if (!function) delete data;
+
+  return function;
+}
 
 EdonRuntime::EdonRuntime() {
-    edon::initSystemIO();
+  edon::initSystemIO();
 
-    context = JSGlobalContextCreate(nullptr);
+  context = JSGlobalContextCreate(nullptr);
 
-    edon::registerNativeIO(context);
-    edon::ffi::registerNamespace(context);
+  moduleLoader = std::make_unique<ModuleLoader>(
+      context, [this](const std::string &parentFilename) { return makeRequire(parentFilename); });
 
-    registerRequire(context);
-    bootstrapCoreLibraries();
+  edon::registerNativeIO(context);
+  edon::ffi::registerNamespace(context);
+
+  JSObjectRef global = JSContextGetGlobalObject(context);
+  JSObjectRef function = makeRequire("");
+
+  JSStringRef name = JSStringCreateWithUTF8CString("require");
+
+  if (function) {
+    JSObjectSetProperty(context, global, name, function, kJSPropertyAttributeNone, nullptr);
+  }
+
+  JSStringRelease(name);
+
+  bootstrapCoreLibraries();
 }
 
 EdonRuntime::~EdonRuntime() {
-    if (!context)
-        return;
+  moduleLoader.reset();
 
-    JSGlobalContextRelease(context);
-    context = nullptr;
+  if (!context) return;
+
+  JSGlobalContextRelease(context);
+  context = nullptr;
 }
 
 void EdonRuntime::bootstrapCoreLibraries() {
-    const char *bootstrapJS = R"js(
+  const char *bootstrapJS = R"js(
         (function() {
             const styles = {
                 bold: "\x1b[1m", reset: "\x1b[0m", gray: "\x1b[90m",
@@ -240,33 +210,21 @@ void EdonRuntime::bootstrapCoreLibraries() {
                     }
 
                     if (value instanceof Date)
-                        return colorize(
-                            "magenta",
-                            value.toISOString()
-                        );
+                        return colorize("magenta", value.toISOString());
 
                     if (value instanceof RegExp)
-                        return colorize(
-                            "red",
-                            value.toString()
-                        );
+                        return colorize("red", value.toString());
 
                     if (value instanceof Error) {
                         const name = value.name || "Error";
-                        const msg =
-                            value.message
-                                ? `: ${value.message}`
-                                : "";
+                        const msg = value.message
+                            ? `: ${value.message}`
+                            : "";
+                        const stack = value.stack
+                            ? `\n    at ${value.stack}`
+                            : "";
 
-                        const stack =
-                            value.stack
-                                ? `\n    at ${value.stack}`
-                                : "";
-
-                        return colorize(
-                            "red",
-                            `${name}${msg}${stack}`
-                        );
+                        return colorize("red", `${name}${msg}${stack}`);
                     }
 
                     if (value instanceof Map) {
@@ -277,15 +235,9 @@ void EdonRuntime::bootstrapCoreLibraries() {
 
                         value.forEach((v, k) => {
                             entries.push(
-                                `${inspect(
-                                    k,
-                                    {...opts, inObj: true},
-                                    seen
-                                )} => ${inspect(
-                                    v,
-                                    {...opts, inObj: true},
-                                    seen
-                                )}`
+                                `${inspect(k, {...opts, inObj: true}, seen)} => ${
+                                    inspect(v, {...opts, inObj: true}, seen)
+                                }`
                             );
                         });
 
@@ -297,11 +249,7 @@ void EdonRuntime::bootstrapCoreLibraries() {
                             return colorize("cyan", "[Set]");
 
                         const items = Array.from(value).map(
-                            v => inspect(
-                                v,
-                                {...opts, inObj: true},
-                                seen
-                            )
+                            v => inspect(v, {...opts, inObj: true}, seen)
                         );
 
                         return `Set(${value.size}) { ${items.join(", ")} }`;
@@ -323,45 +271,21 @@ void EdonRuntime::bootstrapCoreLibraries() {
                         const items = [];
 
                         for (let i = 0; i < value.length; i++) {
-                            items.push(
-                                inspect(
-                                    value[i],
-                                    childOpts,
-                                    seen
-                                )
-                            );
+                            items.push(inspect(value[i], childOpts, seen));
                         }
 
-                        const customKeys =
-                            Reflect.ownKeys(value).filter(
-                                k =>
-                                    k !== "length" &&
-                                    isNaN(Number(k))
-                            );
+                        const customKeys = Reflect.ownKeys(value).filter(
+                            k => k !== "length" && isNaN(Number(k))
+                        );
 
                         for (const k of customKeys) {
-                            const prop =
-                                safeGetPropertyDescriptor(
-                                    value,
-                                    k
-                                );
-
-                            const keyStr =
-                                typeof k === "symbol"
-                                    ? colorize("green", k.toString())
-                                    : k;
-
-                            const valStr =
-                                prop.type === "accessor"
-                                    ? colorize(
-                                        "cyan",
-                                        "[Getter/Setter]"
-                                    )
-                                    : inspect(
-                                        prop.value,
-                                        childOpts,
-                                        seen
-                                    );
+                            const prop = safeGetPropertyDescriptor(value, k);
+                            const keyStr = typeof k === "symbol"
+                                ? colorize("green", k.toString())
+                                : k;
+                            const valStr = prop.type === "accessor"
+                                ? colorize("cyan", "[Getter/Setter]")
+                                : inspect(prop.value, childOpts, seen);
 
                             items.push(`${keyStr}: ${valStr}`);
                         }
@@ -372,28 +296,13 @@ void EdonRuntime::bootstrapCoreLibraries() {
                     const keys = Reflect.ownKeys(value);
 
                     const elements = keys.map(k => {
-                        const prop =
-                            safeGetPropertyDescriptor(
-                                value,
-                                k
-                            );
-
-                        const keyStr =
-                            typeof k === "symbol"
-                                ? colorize("green", k.toString())
-                                : k;
-
-                        const valStr =
-                            prop.type === "accessor"
-                                ? colorize(
-                                    "cyan",
-                                    "[Getter/Setter]"
-                                )
-                                : inspect(
-                                    prop.value,
-                                    childOpts,
-                                    seen
-                                );
+                        const prop = safeGetPropertyDescriptor(value, k);
+                        const keyStr = typeof k === "symbol"
+                            ? colorize("green", k.toString())
+                            : k;
+                        const valStr = prop.type === "accessor"
+                            ? colorize("cyan", "[Getter/Setter]")
+                            : inspect(prop.value, childOpts, seen);
 
                         return `${keyStr}: ${valStr}`;
                     });
@@ -443,8 +352,7 @@ void EdonRuntime::bootstrapCoreLibraries() {
                         }
                     );
 
-                    const remaining =
-                        args.slice(i).map(a => inspect(a));
+                    const remaining = args.slice(i).map(a => inspect(a));
 
                     return remaining.length > 0
                         ? `${str} ${remaining.join(" ")}`
@@ -476,91 +384,54 @@ void EdonRuntime::bootstrapCoreLibraries() {
                     if (!assertion) {
                         const err = new Error(
                             "Assertion failed" +
-                            (
-                                args.length > 0
-                                    ? ": " + format(...args)
-                                    : ""
-                            )
+                            (args.length > 0 ? ": " + format(...args) : "")
                         );
 
-                        __edon_write(
-                            2,
-                            err.stack + "\n"
-                        );
+                        __edon_write(2, err.stack + "\n");
                     }
                 }
             };
         })();
     )js";
 
-    executeSource(bootstrapJS, "<bootstrap:core>");
+  executeSource(bootstrapJS, "<bootstrap:core>");
 }
 
-bool EdonRuntime::executeSource(
-    const std::string &source,
-    const std::string &filename) {
+bool EdonRuntime::executeSource(const std::string &source, const std::string &filename) {
+  JSStringRef jsSource = JSStringCreateWithUTF8CString(source.c_str());
+  JSStringRef jsFilename = JSStringCreateWithUTF8CString(filename.c_str());
 
-    JSStringRef jsSource =
-        JSStringCreateWithUTF8CString(source.c_str());
+  if (!jsSource || !jsFilename) {
+    if (jsSource) JSStringRelease(jsSource);
+    if (jsFilename) JSStringRelease(jsFilename);
 
-    JSStringRef jsFilename =
-        JSStringCreateWithUTF8CString(filename.c_str());
+    std::cerr << "Uncaught Error: Failed to create JavaScript source strings\n";
 
-    if (!jsSource || !jsFilename) {
-        if (jsSource)
-            JSStringRelease(jsSource);
+    return false;
+  }
 
-        if (jsFilename)
-            JSStringRelease(jsFilename);
+  JSValueRef error = nullptr;
 
-        std::cerr
-            << "Uncaught Error: Failed to create JavaScript source strings\n";
+  (void)JSEvaluateScript(context, jsSource, nullptr, jsFilename, 1, &error);
 
-        return false;
-    }
+  JSStringRelease(jsSource);
+  JSStringRelease(jsFilename);
 
-    JSValueRef error = nullptr;
+  if (error) {
+    edon::printDiagnostic(source, filename, context, error);
+    return false;
+  }
 
-    (void)JSEvaluateScript(
-        context,
-        jsSource,
-        nullptr,
-        jsFilename,
-        1,
-        &error);
-
-    JSStringRelease(jsSource);
-    JSStringRelease(jsFilename);
-
-    if (error) {
-        edon::printDiagnostic(
-            source,
-            filename,
-            context,
-            error);
-
-        return false;
-    }
-
-    return true;
+  return true;
 }
 
 bool EdonRuntime::executeFile(const std::string &filepath) {
-    std::ifstream file(filepath);
+  JSValueRef error = nullptr;
 
-    if (!file.is_open()) {
-        std::cerr
-            << "edon error: Cannot open file "
-            << filepath
-            << '\n';
+  moduleLoader->loadFile(filepath, &error);
 
-        return false;
-    }
+  if (!error) return true;
 
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    return executeSource(
-        buffer.str(),
-        filepath);
+  edon::printDiagnostic("", filepath, context, error);
+  return false;
 }

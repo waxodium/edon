@@ -1,8 +1,10 @@
-#include "types.hpp"
+#include "ffi/types.hpp"
+#include "ffi/signature.hpp"
 
 #include <ffi.h>
 
 #include <algorithm>
+
 #include <limits>
 #include <new>
 #include <unordered_set>
@@ -39,6 +41,8 @@ ffi_type *primitiveFFIType(TypeKind kind) {
 
   case TypeKind::UInt64: return &ffi_type_uint64;
 
+  case TypeKind::Enum: return &ffi_type_sint32;
+
   case TypeKind::Size:
     if constexpr (sizeof(std::size_t) == 4) return &ffi_type_uint32;
     else
@@ -57,6 +61,7 @@ ffi_type *primitiveFFIType(TypeKind kind) {
 
   case TypeKind::Function:
   case TypeKind::Struct:
+  case TypeKind::Union:
   case TypeKind::Array: return nullptr;
   }
 
@@ -70,26 +75,14 @@ bool beginPreparing(const Type *type) { return preparing.insert(type).second; }
 void endPreparing(const Type *type) { preparing.erase(type); }
 
 bool prepareFunction(Type &type) {
-  if (!type.functionReturn) return false;
+  if (type.complete) return true;
 
-  if (!prepareType(type.functionReturn)) return false;
+  if (!type.functionSignature) return false;
 
-  if (!type.functionReturn->ffi) return false;
+  if (!prepareSignature(*type.functionSignature)) return false;
 
-  for (const auto &argument : type.functionArgs) {
-    if (!argument) return false;
-
-    if (!prepareType(argument)) return false;
-
-    if (!argument->ffi) return false;
-  }
-
-  /*
-   * A function type is metadata only. libffi represents the
-   * callable value as a pointer, so this Type deliberately
-   * has no ffi_type of its own.
-   */
   type.complete = true;
+
   return true;
 }
 
@@ -142,6 +135,12 @@ bool prepareStruct(Type &type) {
     return false;
   }
 
+  if (aggregate->size == 0 || aggregate->alignment == 0) {
+    delete[] elementStorage;
+    delete aggregate;
+    return false;
+  }
+
   type.ffi = aggregate;
   type.size = aggregate->size;
   type.alignment = aggregate->alignment;
@@ -149,6 +148,48 @@ bool prepareStruct(Type &type) {
   for (std::size_t i = 0; i < type.fields.size(); ++i) type.fields[i].offset = offsets[i];
 
   type.complete = true;
+
+  return true;
+}
+
+bool prepareUnion(Type &type) {
+  if (type.fields.empty()) return false;
+
+  std::size_t size = 0;
+  std::size_t alignment = 0;
+
+  for (Field &field : type.fields) {
+    if (!field.type) return false;
+
+    if (!prepareType(field.type)) return false;
+
+    if (!field.type->complete || field.type->size == 0 || field.type->alignment == 0) {
+      return false;
+    }
+
+    field.offset = 0;
+
+    if (field.type->size > size) size = field.type->size;
+    if (field.type->alignment > alignment) alignment = field.type->alignment;
+  }
+
+  if (size == 0 || alignment == 0) return false;
+
+  const std::size_t remainder = size % alignment;
+
+  if (remainder != 0) {
+    const std::size_t padding = alignment - remainder;
+
+    if (size > std::numeric_limits<std::size_t>::max() - padding) return false;
+
+    size += padding;
+  }
+
+  type.ffi = nullptr;
+  type.size = size;
+  type.alignment = alignment;
+  type.complete = true;
+
   return true;
 }
 
@@ -184,7 +225,7 @@ bool prepareArray(Type &type) {
     return false;
   }
 
-  std::copy(elements.begin(), elements.end(), elementStorage);
+  for (std::size_t i = 0; i < elements.size(); ++i) elementStorage[i] = elements[i];
 
   aggregate->size = 0;
   aggregate->alignment = 0;
@@ -207,11 +248,27 @@ bool prepareArray(Type &type) {
   return true;
 }
 
+bool prepareEnum(Type &type) {
+  if (type.complete && type.ffi) return true;
+
+  if (type.enumValues.empty()) return false;
+
+  ffi_type *ffi = &ffi_type_sint32;
+
+  type.ffi = ffi;
+  type.size = ffi->size;
+  type.alignment = ffi->alignment;
+  type.complete = true;
+
+  return true;
+}
+
 bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   if (!type) return false;
 
-  if (type->complete && type->ffi) return true;
-  if (type->kind == TypeKind::Function && type->complete) { return true; }
+  if (type->complete && (type->ffi || type->kind == TypeKind::Union)) return true;
+
+  if (type->kind == TypeKind::Function && type->complete) return true;
 
   if (isPreparing(type.get())) return false;
 
@@ -235,7 +292,11 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
 
     case TypeKind::Struct: result = prepareStruct(*type); break;
 
+    case TypeKind::Union: result = prepareUnion(*type); break;
+
     case TypeKind::Array: result = prepareArray(*type); break;
+
+    case TypeKind::Enum: result = prepareEnum(*type); break;
 
     case TypeKind::Void:
     case TypeKind::Bool:
@@ -257,6 +318,7 @@ bool prepareTypeInternal(const std::shared_ptr<Type> &type) {
   }
 
   endPreparing(type.get());
+
   return result;
 }
 
@@ -296,6 +358,26 @@ std::shared_ptr<Type> makeStruct(const std::string &name, std::vector<Field> fie
   return type;
 }
 
+std::shared_ptr<Type> makeUnion(const std::string &name, std::vector<Field> fields) {
+  auto type = std::make_shared<Type>();
+
+  type->kind = TypeKind::Union;
+  type->name = name;
+  type->fields = std::move(fields);
+
+  return type;
+}
+
+std::shared_ptr<Type> makeEnum(const std::string &name, std::vector<EnumValue> values) {
+  auto type = std::make_shared<Type>();
+
+  type->kind = TypeKind::Enum;
+  type->name = name;
+  type->enumValues = std::move(values);
+
+  return type;
+}
+
 std::shared_ptr<Type> makeArray(std::shared_ptr<Type> element, std::size_t count) {
   auto type = std::make_shared<Type>();
 
@@ -330,16 +412,22 @@ bool prepareSignature(Signature &signature) {
 
     if (!argument->ffi) return false;
 
-    try {
-      ffiArgs.push_back(argument->ffi);
-    } catch (...) { return false; }
+    ffiArgs.push_back(argument->ffi);
   }
 
   ffi_cif cif{};
 
-  const ffi_status status =
-      ffi_prep_cif(&cif, FFI_DEFAULT_ABI, static_cast<unsigned int>(ffiArgs.size()),
-                   signature.returns->ffi, ffiArgs.empty() ? nullptr : ffiArgs.data());
+  ffi_status status;
+
+  if (signature.variadic) {
+    const unsigned int fixedCount = static_cast<unsigned int>(ffiArgs.size());
+
+    status = ffi_prep_cif_var(&cif, FFI_DEFAULT_ABI, fixedCount, fixedCount, signature.returns->ffi,
+                              ffiArgs.empty() ? nullptr : ffiArgs.data());
+  } else {
+    status = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, static_cast<unsigned int>(ffiArgs.size()),
+                          signature.returns->ffi, ffiArgs.empty() ? nullptr : ffiArgs.data());
+  }
 
   if (status != FFI_OK) return false;
 
@@ -349,7 +437,6 @@ bool prepareSignature(Signature &signature) {
 
   return true;
 }
-
 const char *typeName(TypeKind kind) {
   switch (kind) {
   case TypeKind::Void: return "void";
@@ -388,7 +475,11 @@ const char *typeName(TypeKind kind) {
 
   case TypeKind::Struct: return "struct";
 
+  case TypeKind::Union: return "union";
+
   case TypeKind::Array: return "array";
+
+  case TypeKind::Enum: return "enum";
   }
 
   return "unknown";
@@ -400,12 +491,13 @@ bool isInteger(TypeKind kind) {
   return kind == TypeKind::Bool || kind == TypeKind::Char || kind == TypeKind::Int8 ||
          kind == TypeKind::UInt8 || kind == TypeKind::Int16 || kind == TypeKind::UInt16 ||
          kind == TypeKind::Int32 || kind == TypeKind::UInt32 || kind == TypeKind::Int64 ||
-         kind == TypeKind::UInt64 || kind == TypeKind::Size || kind == TypeKind::SSize;
+         kind == TypeKind::UInt64 || kind == TypeKind::Size || kind == TypeKind::SSize ||
+         kind == TypeKind::Enum;
 }
 
 bool isSignedInteger(TypeKind kind) {
   return kind == TypeKind::Int8 || kind == TypeKind::Int16 || kind == TypeKind::Int32 ||
-         kind == TypeKind::Int64 || kind == TypeKind::SSize;
+         kind == TypeKind::Int64 || kind == TypeKind::SSize || kind == TypeKind::Enum;
 }
 
 bool isUnsignedInteger(TypeKind kind) {
@@ -417,6 +509,8 @@ bool isFloating(TypeKind kind) { return kind == TypeKind::Float || kind == TypeK
 
 bool isPointer(TypeKind kind) { return kind == TypeKind::Pointer; }
 
-bool isAggregate(TypeKind kind) { return kind == TypeKind::Struct || kind == TypeKind::Array; }
+bool isAggregate(TypeKind kind) {
+  return kind == TypeKind::Struct || kind == TypeKind::Union || kind == TypeKind::Array;
+}
 
 }} // namespace edon::ffi
