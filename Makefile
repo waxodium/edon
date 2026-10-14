@@ -1,6 +1,8 @@
 CXX := g++
 
 SRC_DIR := src
+CORE_DIR := $(SRC_DIR)/core
+CLI_DIR := $(SRC_DIR)/cli
 FFI_DIR := $(SRC_DIR)/ffi
 PARSER_DIR := $(FFI_DIR)/parser
 BUILD_DIR := build
@@ -14,6 +16,8 @@ CXXFLAGS := \
 	-O2 \
 	-I$(SRC_DIR) \
 	-Iincludes \
+	-I$(CORE_DIR) \
+	-I$(CLI_DIR) \
 	-I$(PARSER_DIR) \
 	$(shell pkg-config --cflags javascriptcoregtk-4.1)
 
@@ -24,12 +28,13 @@ LDFLAGS := \
 	-ldl \
 	-lm
 
-SRC_SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+CORE_SRCS := $(wildcard $(CORE_DIR)/*.cpp)
+CLI_SRCS := $(wildcard $(CLI_DIR)/*.cpp)
 FFI_SRCS := \
 	$(wildcard $(FFI_DIR)/*.cpp) \
 	$(wildcard $(PARSER_DIR)/*.cpp)
 
-SRCS := $(SRC_SRCS) $(FFI_SRCS)
+SRCS := $(CORE_SRCS) $(CLI_SRCS) $(FFI_SRCS)
 
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
@@ -50,4 +55,3 @@ run: $(TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR)
-

@@ -1,43 +1,56 @@
 # Edon.js
 
-A *distinct* **JavaScript**, **TypeScript** runtime powered by [JavaScriptCore]((https://github.com/WebKit/WebKit/tree/main/Source/JavaScriptCore)), built to cross and push the limits into native code.
+**JavaScript, with a way into the native code.**
 
-#### Q1: What does it do?
-Compile C. Load native libraries (`.dll`, `.so`, `.dylib`). Call C functions. Work with memory, pointers, and structs. Interact directly with the native ABI.
+A JavaScript runtime powered by [JavaScriptCore](https://github.com/WebKit/WebKit/tree/main/Source/JavaScriptCore). This runtime is the closest ever for JS to interact with bare-metal C programming language. It is an independent runtime from [node.js](nodejs.org)
 
-Write your application in JavaScript or TypeScript, embed native C where you need it, and compile the whole thing into a standalone native executable or **optinally run it** as a runtime.
+[Getting Started](./docs) · [Examples](./examples) · [License](./LICENSE)
 
-Edon is a bridge between JavaScript and native C.
+---
 
-#### Q2: What's the difference?
-`edon` is designed around a different idea from Node.js, Bun, Deno, and WebAssembly.
+## What is Edon?
+Edon is a computer software, created for computer programming. It is technically known as a **"Distinctive and minimalist JavaScript runtime"** made for interacting with C language natively. 
 
-Node.js, Bun, and Deno primarily provide JavaScript runtimes with large runtime APIs and huge development enviroment.
+The Edon.js project attempts to replicate Go-inspired concepts for JavaScript
+## Get started
 
-Edon is a full runtime and compile apps into standalone executables, while providing APIs to interact with C programming language natively. And keeping compatibility with the [node.js](https://nodejs.org/) programs.
+### Requirements
 
-#### Q3: Why should use it?
-Choose edon for direct JavaScript integration with C code, native libraries, OS APIs, native memory, and platform capabilities. A lower-level alternative to web-focused development.
+Edon currently depends on three libraries:
 
-#### Q4: How to use it?
-Take some look at [examples](./examples) folder and read edon documentation through
-[docs](./docs) directory.
-
-## Install
-Development packages:
 - JavaScriptCoreGTK 4.1
 - libffi
 - TinyCC
 
-(there are no install scripts, may inconveniently install these packages manually)
+You may need to install these development packages manually using your system's package manager.
+
+### Build from source
 
 ```sh
-git clone https://github.com/waxodium/edon.git && cd ./edon
+git clone https://github.com/waxodium/edon.git
+cd edon
 make
+```
+
+Run Edon:
+
+```sh
 ./build/edon
 ```
 
-## License
-Edon is MIT licensed, check the license file at root source code for more details:
-[LICENSE](./LICENSE)
+## Explore
 
+Want to see what Edon can do?
+
+- Browse [`examples/`](./examples) to explore example programs.
+- Read the [`docs/`](./docs) to learn more about the runtime and its features.
+
+## Project status
+
+Edon is a work in progress. Features and APIs are still evolving..
+
+We follows the standard conventional Github contributions for our project. 
+
+## License
+
+Edon is open source and available under the [MIT License](./LICENSE).

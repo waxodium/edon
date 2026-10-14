@@ -86,7 +86,6 @@ bool parseFunctionDeclaration(const std::string &source, ParsedFunction &functio
 
 bool parseCSource(const std::string &source, ParsedCSource &result, std::string &error);
 
-// Private aggregate-definition parsers shared with parser.cpp.
 bool parseStructDefinition(const std::string &source, TypeContext *context, std::string &error);
 bool parseUnionDefinition(const std::string &source, TypeContext *context, std::string &error);
 bool parseEnumDefinition(const std::string &source, TypeContext *context, std::string &error);
