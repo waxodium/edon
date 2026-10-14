@@ -5,6 +5,7 @@ CORE_DIR := $(SRC_DIR)/core
 CLI_DIR := $(SRC_DIR)/cli
 FFI_DIR := $(SRC_DIR)/ffi
 PARSER_DIR := $(FFI_DIR)/parser
+TOOL_DIR := tools
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/edon
 
@@ -49,8 +50,8 @@ CORE_HEADER := $(BUILD_DIR)/embedjs.hpp
 
 all: $(TARGET)
 
-$(CORE_HEADER): $(CORE_DIR)/util.js $(CORE_DIR)/console.js $(CORE_DIR)/embed_js.py
-	python3 $(CORE_DIR)/embed_js.py $@ $(CORE_DIR)/util.js $(CORE_DIR)/console.js
+$(CORE_HEADER): $(CORE_DIR)/util.js $(CORE_DIR)/console.js $(TOOL_DIR)/embed_js.py
+	python3 $(TOOL_DIR)/embed_js.py $@ $(CORE_DIR)/util.js $(CORE_DIR)/console.js
 
 $(TARGET): $(SRCS) $(CORE_HEADER)
 	@mkdir -p $(BUILD_DIR)
