@@ -1,113 +1,12 @@
 #include "runtime.hpp"
 #include "ffi/api.hpp"
+#include "module_loader.hpp"
 #include "native_io.hpp"
 #include "runtime_output.hpp"
 
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
+#include <memory>
 #include <string>
-#include <utility>
-
-namespace {
-
-void setRequireError(JSContextRef context, JSValueRef *error, const char *message,
-                     const char *code = nullptr) {
-  if (!error) return;
-
-  JSStringRef text = JSStringCreateWithUTF8CString(message);
-  JSValueRef argument = JSValueMakeString(context, text);
-
-  *error = JSObjectMakeError(context, 1, &argument, nullptr);
-
-  if (*error && code) {
-    JSObjectRef object = JSValueToObject(context, *error, nullptr);
-    JSStringRef key = JSStringCreateWithUTF8CString("code");
-    JSStringRef value = JSStringCreateWithUTF8CString(code);
-    if (object && key && value) {
-      JSValueRef codeValue = JSValueMakeString(context, value);
-      JSObjectSetProperty(context, object, key, codeValue, kJSPropertyAttributeNone, nullptr);
-    }
-    if (key) JSStringRelease(key);
-    if (value) JSStringRelease(value);
-  }
-
-  JSStringRelease(text);
-}
-
-JSStringRef makeJSString(const std::string &value) {
-  return JSStringCreateWithUTF8CString(value.c_str());
-}
-
-void setProperty(JSContextRef context, JSObjectRef object, const char *name, JSValueRef value,
-                 JSValueRef *error = nullptr) {
-  JSStringRef key = JSStringCreateWithUTF8CString(name);
-
-  JSObjectSetProperty(context, object, key, value, kJSPropertyAttributeNone, error);
-
-  JSStringRelease(key);
-}
-
-JSValueRef getProperty(JSContextRef context, JSObjectRef object, const char *name,
-                       JSValueRef *error = nullptr) {
-  JSStringRef key = JSStringCreateWithUTF8CString(name);
-  JSValueRef value = JSObjectGetProperty(context, object, key, error);
-
-  JSStringRelease(key);
-
-  return value;
-}
-
-void markCommonJSWrapperError(JSContextRef context, JSValueRef error, const std::string &filepath) {
-  if (!context || !error || !JSValueIsObject(context, error) || filepath.empty()) return;
-
-  JSObjectRef object = JSValueToObject(context, error, nullptr);
-  if (!object) return;
-
-  JSValueRef propertyError = nullptr;
-  JSValueRef value = getProperty(context, object, "edonCommonJSWrapperFiles", &propertyError);
-  JSObjectRef files = nullptr;
-
-  if (!propertyError && value && JSValueIsObject(context, value)) {
-    files = JSValueToObject(context, value, nullptr);
-    if (files && !JSValueIsArray(context, value)) files = nullptr;
-  }
-
-  if (!files) {
-    files = JSObjectMakeArray(context, 0, nullptr, nullptr);
-    if (!files) return;
-    setProperty(context, object, "edonCommonJSWrapperFiles", files);
-  }
-
-  JSStringRef lengthKey = JSStringCreateWithUTF8CString("length");
-  if (!lengthKey) return;
-  JSValueRef lengthValue = JSObjectGetProperty(context, files, lengthKey, nullptr);
-  JSStringRelease(lengthKey);
-  const double rawLength = lengthValue ? JSValueToNumber(context, lengthValue, nullptr) : 0;
-  const std::size_t length = rawLength > 0 ? static_cast<std::size_t>(rawLength) : 0;
-
-  for (std::size_t i = 0; i < length; ++i) {
-    JSValueRef existing =
-        JSObjectGetPropertyAtIndex(context, files, static_cast<unsigned>(i), nullptr);
-    JSStringRef text = JSValueToStringCopy(context, existing, nullptr);
-    if (!text) continue;
-    const std::size_t capacity = JSStringGetMaximumUTF8CStringSize(text);
-    std::string existingPath(capacity, '\0');
-    const std::size_t size = JSStringGetUTF8CString(text, existingPath.data(), capacity);
-    JSStringRelease(text);
-    if (size > 0) existingPath.resize(size - 1);
-    if (existingPath == filepath) return;
-  }
-
-  JSStringRef pathString = JSStringCreateWithUTF8CString(filepath.c_str());
-  if (!pathString) return;
-  JSValueRef pathValue = JSValueMakeString(context, pathString);
-  JSStringRelease(pathString);
-  JSObjectSetPropertyAtIndex(context, files, static_cast<unsigned>(length), pathValue, nullptr);
-}
-
-} // namespace
 
 struct EdonRuntime::RequireData {
   EdonRuntime *runtime;
@@ -138,32 +37,25 @@ JSValueRef EdonRuntime::requireCallAsFunction(JSContextRef context, JSObjectRef 
   auto *data = static_cast<RequireData *>(JSObjectGetPrivate(function));
 
   if (!data || argumentCount != 1 || !JSValueIsString(context, arguments[0])) {
-    setRequireError(context, error, "require() requires exactly one module name string");
-
+    ModuleLoader::setError(context, error, "require() requires exactly one module name string");
     return JSValueMakeUndefined(context);
   }
 
   JSStringRef text = JSValueToStringCopy(context, arguments[0], error);
-
   if (!text) return JSValueMakeUndefined(context);
 
   const std::size_t capacity = JSStringGetMaximumUTF8CStringSize(text);
-
   std::string name(capacity, '\0');
-
   const std::size_t size = JSStringGetUTF8CString(text, name.data(), capacity);
-
   JSStringRelease(text);
 
   if (size == 0) {
-    setRequireError(context, error, "require() received an invalid module name");
-
+    ModuleLoader::setError(context, error, "require() received an invalid module name");
     return JSValueMakeUndefined(context);
   }
 
   name.resize(size - 1);
-
-  return data->runtime->requireModule(name, data->parentFilename, error);
+  return data->runtime->moduleLoader->require(name, data->parentFilename, error);
 }
 
 JSObjectRef EdonRuntime::makeRequire(const std::string &parentFilename) {
@@ -176,164 +68,13 @@ JSObjectRef EdonRuntime::makeRequire(const std::string &parentFilename) {
   return function;
 }
 
-JSValueRef EdonRuntime::requireModule(const std::string &name, const std::string &parentFilename,
-                                      JSValueRef *error) {
-  if (name == "edon:ffi") { return edon::ffi::requireModule(context, name, error); }
-
-  const bool isJS = name.size() >= 3 && name.compare(name.size() - 3, 3, ".js") == 0;
-
-  const bool isCJS = name.size() >= 4 && name.compare(name.size() - 4, 4, ".cjs") == 0;
-
-  if (!isJS && !isCJS) {
-    setRequireError(context, error, "Local modules must explicitly use the .js or .cjs suffix");
-
-    return JSValueMakeUndefined(context);
-  }
-
-  namespace fs = std::filesystem;
-
-  try {
-    fs::path requested(name);
-
-    if (!requested.is_absolute()) {
-      const fs::path base =
-          parentFilename.empty() ? fs::current_path() : fs::path(parentFilename).parent_path();
-
-      requested = base / requested;
-    }
-
-    return loadCommonJSFile(fs::weakly_canonical(requested).string(), error);
-  } catch (const fs::filesystem_error &) {
-    setRequireError(context, error, "Could not resolve the requested module path",
-                    "ModuleNotFound");
-
-    return JSValueMakeUndefined(context);
-  }
-}
-
-JSValueRef EdonRuntime::loadCommonJSFile(const std::string &filepath, JSValueRef *error) {
-  namespace fs = std::filesystem;
-
-  std::string resolved;
-
-  try {
-    resolved = fs::weakly_canonical(filepath).string();
-  } catch (const fs::filesystem_error &) {
-    setRequireError(context, error, "Could not resolve module path", "ModuleNotFound");
-    return JSValueMakeUndefined(context);
-  }
-
-  if (const auto found = moduleCache.find(resolved); found != moduleCache.end()) {
-    return getProperty(context, found->second, "exports", error);
-  }
-
-  std::ifstream file(resolved);
-
-  if (!file.is_open()) {
-    const std::string message = "Cannot open module: " + resolved;
-
-    setRequireError(context, error, message.c_str(), "ModuleNotFound");
-
-    return JSValueMakeUndefined(context);
-  }
-
-  std::stringstream buffer;
-  buffer << file.rdbuf();
-
-  if (file.bad()) {
-    const std::string message = "Failed to read module: " + resolved;
-
-    setRequireError(context, error, message.c_str(), "ModuleLoadFailed");
-
-    return JSValueMakeUndefined(context);
-  }
-
-  const std::string source = buffer.str();
-
-  JSObjectRef module = JSObjectMake(context, nullptr, nullptr);
-  JSObjectRef exports = JSObjectMake(context, nullptr, nullptr);
-
-  if (!module || !exports) {
-    setRequireError(context, error, "Failed to create module objects");
-    return JSValueMakeUndefined(context);
-  }
-
-  setProperty(context, module, "exports", exports, error);
-
-  if (error && *error) { return JSValueMakeUndefined(context); }
-
-  const auto [cacheEntry, inserted] = moduleCache.emplace(resolved, module);
-
-  if (!inserted) { return getProperty(context, cacheEntry->second, "exports", error); }
-
-  JSValueProtect(context, module);
-
-  JSObjectRef localRequire = makeRequire(resolved);
-
-  if (!localRequire) {
-    moduleCache.erase(resolved);
-    JSValueUnprotect(context, module);
-
-    setRequireError(context, error, "Failed to create require function");
-
-    return JSValueMakeUndefined(context);
-  }
-
-  const std::string directory = fs::path(resolved).parent_path().string();
-
-  JSStringRef filenameString = makeJSString(resolved);
-  JSStringRef dirnameString = makeJSString(directory);
-
-  JSValueRef filenameValue = JSValueMakeString(context, filenameString);
-
-  JSValueRef dirnameValue = JSValueMakeString(context, dirnameString);
-
-  const std::string wrapped =
-      "(function(exports, require, module, __filename, __dirname) {\n" + source + "\n})";
-
-  JSStringRef script = makeJSString(wrapped);
-  JSStringRef scriptName = makeJSString(resolved);
-
-  JSValueRef localError = nullptr;
-
-  JSValueRef functionValue = JSEvaluateScript(context, script, nullptr, scriptName, 1, &localError);
-
-  if (!localError && functionValue && JSValueIsObject(context, functionValue)) {
-    JSObjectRef function = JSValueToObject(context, functionValue, &localError);
-
-    if (function && JSObjectIsFunction(context, function)) {
-      JSValueRef arguments[] = {exports, localRequire, module, filenameValue, dirnameValue};
-
-      JSObjectCallAsFunction(context, function, nullptr, 5, arguments, &localError);
-    } else if (!localError) {
-      setRequireError(context, &localError, "Failed to compile CommonJS module");
-    }
-  } else if (!localError) {
-    setRequireError(context, &localError, "Failed to compile CommonJS module");
-  }
-
-  JSStringRelease(script);
-  JSStringRelease(scriptName);
-  JSStringRelease(filenameString);
-  JSStringRelease(dirnameString);
-
-  if (localError) {
-    markCommonJSWrapperError(context, localError, resolved);
-    moduleCache.erase(resolved);
-    JSValueUnprotect(context, module);
-
-    if (error) *error = localError;
-
-    return JSValueMakeUndefined(context);
-  }
-
-  return getProperty(context, module, "exports", error);
-}
-
 EdonRuntime::EdonRuntime() {
   edon::initSystemIO();
 
   context = JSGlobalContextCreate(nullptr);
+
+  moduleLoader = std::make_unique<ModuleLoader>(
+      context, [this](const std::string &parentFilename) { return makeRequire(parentFilename); });
 
   edon::registerNativeIO(context);
   edon::ffi::registerNamespace(context);
@@ -353,14 +94,9 @@ EdonRuntime::EdonRuntime() {
 }
 
 EdonRuntime::~EdonRuntime() {
+  moduleLoader.reset();
+
   if (!context) return;
-
-  for (const auto &[path, module] : moduleCache) {
-    (void)path;
-    JSValueUnprotect(context, module);
-  }
-
-  moduleCache.clear();
 
   JSGlobalContextRelease(context);
   context = nullptr;
@@ -692,11 +428,10 @@ bool EdonRuntime::executeSource(const std::string &source, const std::string &fi
 bool EdonRuntime::executeFile(const std::string &filepath) {
   JSValueRef error = nullptr;
 
-  loadCommonJSFile(filepath, &error);
+  moduleLoader->loadFile(filepath, &error);
 
   if (!error) return true;
 
   edon::printDiagnostic("", filepath, context, error);
-
   return false;
 }

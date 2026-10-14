@@ -3,15 +3,17 @@
 #include <JavaScriptCore/JavaScript.h>
 
 #include <cstddef>
+#include <memory>
 #include <string>
-#include <unordered_map>
+
+class ModuleLoader;
 
 class EdonRuntime {
 private:
   struct RequireData;
 
   JSGlobalContextRef context = nullptr;
-  std::unordered_map<std::string, JSObjectRef> moduleCache;
+  std::unique_ptr<ModuleLoader> moduleLoader;
 
   static JSClassRef getRequireClass();
   static void finalizeRequire(JSObjectRef object);
@@ -21,12 +23,6 @@ private:
                                           const JSValueRef arguments[], JSValueRef *error);
 
   JSObjectRef makeRequire(const std::string &parentFilename);
-
-  JSValueRef requireModule(const std::string &name, const std::string &parentFilename,
-                           JSValueRef *error);
-
-  JSValueRef loadCommonJSFile(const std::string &filepath, JSValueRef *error);
-
   void bootstrapCoreLibraries();
 
 public:
@@ -37,6 +33,5 @@ public:
   EdonRuntime &operator=(const EdonRuntime &) = delete;
 
   bool executeFile(const std::string &filepath);
-
   bool executeSource(const std::string &source, const std::string &filename = "<anonymous>");
 };
