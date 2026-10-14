@@ -19,6 +19,7 @@ CXXFLAGS := \
 	-I$(CORE_DIR) \
 	-I$(CLI_DIR) \
 	-I$(PARSER_DIR) \
+	-I$(BUILD_DIR) \
 	$(shell pkg-config --cflags javascriptcoregtk-4.1)
 
 LDFLAGS := \
@@ -41,11 +42,17 @@ GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 CXXFLAGS += \
 	-DEDON_COMMIT_HASH=\"$(GIT_HASH)\"
 
+CORE_HEADER := $(BUILD_DIR)/embedjs.hpp
+
 .PHONY: all clean run
+.ONESHELL:
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS)
+$(CORE_HEADER): $(CORE_DIR)/util.js $(CORE_DIR)/console.js $(CORE_DIR)/embed_js.py
+	python3 $(CORE_DIR)/embed_js.py $@ $(CORE_DIR)/util.js $(CORE_DIR)/console.js
+
+$(TARGET): $(SRCS) $(CORE_HEADER)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(SRCS) -o $@ $(LDFLAGS)
 	@echo "Build complete: ./$(TARGET) ($(GIT_HASH))"
@@ -55,3 +62,4 @@ run: $(TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
